@@ -14569,14 +14569,23 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "collections",
+ "db",
  "editor",
  "gpui",
  "jupyter-protocol",
+ "log",
+ "project",
  "repl",
+ "serde",
  "serde_json",
+ "settings",
  "terminal_view",
+ "theme",
+ "theme_settings",
  "ui",
  "util",
+ "uuid",
  "workspace",
 ]
 

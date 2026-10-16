@@ -1786,6 +1786,7 @@
     "bindings": {
       "cmd-enter": "repl::Run",
       "ctrl-cmd-enter": "r_tools::SendToTerminal",
+      "ctrl-alt-v": "r_tools::ToggleVariables",
       "ctrl-alt-p": "r_tools::OpenPlots",
     },
   },

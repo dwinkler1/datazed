@@ -1,4 +1,5 @@
 mod plot_view;
+mod variables_panel;
 
 use std::sync::Arc;
 
@@ -10,10 +11,13 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use workspace::{Toast, Workspace, dock::Panel as _, notifications::NotificationId};
 
 pub use plot_view::PlotView;
+pub use variables_panel::VariablesPanel;
 
 actions!(
     r_tools,
     [
+        /// Toggles the R variables panel.
+        ToggleVariables,
         /// Opens the R plot viewer in a split pane.
         OpenPlots,
         /// Sends the current top-level expression or selection to the active terminal.
@@ -30,7 +34,12 @@ pub fn init(cx: &mut App) {
         let tracker = cx.new(|cx| SessionTracker::new(&workspace_entity, cx));
 
         plot_view::open_on_first_plot(&tracker, window, cx);
+        let panel = cx.new(|cx| VariablesPanel::new(tracker.clone(), cx));
+        workspace.add_panel(panel, window, cx);
 
+        workspace.register_action(|workspace, _: &ToggleVariables, window, cx| {
+            workspace.toggle_panel_focus::<VariablesPanel>(window, cx);
+        });
         workspace.register_action(move |workspace, _: &OpenPlots, window, cx| {
             plot_view::open_plot_view(workspace, &tracker, window, cx);
         });
@@ -272,6 +281,139 @@ fn send_to_terminal(
                 cx,
                 |selections| selections.select_ranges([next_anchor..next_anchor]),
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Focusable as _, TestAppContext};
+    use project::{FakeFs, Project};
+    use serde_json::json;
+    use settings::SettingsStore;
+
+    const ONE_PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    fn plot_message(msg_type: &str) -> Arc<JupyterMessage> {
+        let content = jupyter_protocol::JupyterMessageContent::from_type_and_content(
+            msg_type,
+            json!({
+                "data": { "image/png": ONE_PIXEL_PNG },
+                "metadata": {},
+                "transient": { "display_id": "plot-1" }
+            }),
+        );
+        match content {
+            Ok(content) => Arc::new(JupyterMessage::new(content, None)),
+            Err(error) => panic!("invalid {msg_type} fixture: {error}"),
+        }
+    }
+
+    async fn r_tools_workspace(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            init(cx);
+        });
+        let project = Project::test(FakeFs::new(cx.executor()), None, cx).await;
+        cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx))
+    }
+
+    #[gpui::test]
+    async fn test_variables_panel_moves_to_chosen_dock(cx: &mut TestAppContext) {
+        let (workspace, cx) = r_tools_workspace(cx).await;
+        let panel = workspace.read_with(cx, |workspace, cx| {
+            match workspace.panel::<VariablesPanel>(cx) {
+                Some(panel) => panel,
+                None => panic!("variables panel was not registered"),
+            }
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_position(workspace::dock::DockPosition::Left, window, cx)
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace
+                    .left_dock()
+                    .read(cx)
+                    .panel::<VariablesPanel>()
+                    .is_some()
+            );
+            assert!(
+                workspace
+                    .right_dock()
+                    .read(cx)
+                    .panel::<VariablesPanel>()
+                    .is_none()
+            );
+        });
+        cx.run_until_parked();
+        let saved = cx
+            .update(|_, cx| db::kvp::KeyValueStore::global(cx).read_kvp("r_variables_panel_dock"));
+        assert_eq!(saved.ok().flatten().as_deref(), Some("left"));
+
+        let tracker = panel.read_with(cx, |panel, _| panel.tracker().clone());
+        let reopened = cx.update(|_, cx| cx.new(|cx| VariablesPanel::new(tracker, cx)));
+        cx.update(|window, cx| {
+            assert_eq!(
+                reopened.read(cx).position(window, cx),
+                workspace::dock::DockPosition::Left
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_first_plot_opens_split_without_stealing_focus(cx: &mut TestAppContext) {
+        let (workspace, cx) = r_tools_workspace(cx).await;
+
+        let tracker = workspace.read_with(cx, |workspace, cx| {
+            match workspace.panel::<VariablesPanel>(cx) {
+                Some(panel) => panel.read(cx).tracker().clone(),
+                None => panic!("variables panel was not registered"),
+            }
+        });
+        let original_pane = workspace.update_in(cx, |workspace, window, cx| {
+            let pane = workspace.active_pane().clone();
+            let focus_handle = pane.focus_handle(cx);
+            window.focus(&focus_handle, cx);
+            pane
+        });
+
+        tracker.update(cx, |_, cx| {
+            cx.emit(TrackerEvent::KernelMessage(plot_message("display_data")))
+        });
+        cx.run_until_parked();
+        tracker.update(cx, |_, cx| {
+            cx.emit(TrackerEvent::KernelMessage(plot_message(
+                "update_display_data",
+            )))
+        });
+        cx.run_until_parked();
+
+        let original_focus = original_pane.read_with(cx, |pane, cx| pane.focus_handle(cx));
+        cx.update(|window, cx| {
+            assert!(original_focus.contains_focused(window, cx));
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            let plot_views = workspace.items_of_type::<PlotView>(cx).collect::<Vec<_>>();
+            assert_eq!(plot_views.len(), 1);
+            assert_eq!(plot_views[0].read(cx).plot_count(), 1);
+            assert_eq!(workspace.panes().len(), 2);
+            assert_eq!(workspace.active_pane(), &original_pane);
+        });
+
+        cx.dispatch_action(OpenPlots);
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.items_of_type::<PlotView>(cx).count(), 1);
+            assert_eq!(workspace.panes().len(), 2);
         });
     }
 }
