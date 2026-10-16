@@ -1,0 +1,147 @@
+# Rebases the DataZed commits (branch r-tools) onto each new stable Zed
+# release, runs the repl and r_tools checks, and pushes the result to
+# datazed-update/<tag> for review. It never changes r-tools: to adopt a
+# release, run update-datazed.sh locally, which rebases, builds and launches
+# DataZed, and publishes with --push.
+#
+# Needs the repository secret DATAZED_PUSH_TOKEN: a fine-grained token for
+# this repository with Contents and Workflows read/write. The default token
+# cannot push the upstream commits that change files in .github/workflows.
+name: DataZed release rebase
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Zed tag to rebase onto (default: newest vX.Y.Z release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: datazed-release-rebase
+
+jobs:
+  rebase:
+    if: github.repository == 'dwinkler1/datazed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      BASE_TAG: datazed/base
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Check out r-tools
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: r-tools
+          fetch-depth: 0
+          token: ${{ secrets.DATAZED_PUSH_TOKEN }}
+
+      - name: Pick the target release
+        id: target
+        env:
+          TARGET_INPUT: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet --force origin "refs/tags/$BASE_TAG:refs/tags/$BASE_TAG"
+          git fetch --quiet --force --no-tags https://github.com/zed-industries/zed.git 'refs/tags/v*:refs/tags/v*'
+          target=${TARGET_INPUT:-$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)}
+          git rev-parse --verify --quiet "$target^{commit}" >/dev/null || { echo "unknown tag $target"; exit 1; }
+          zed_version() { git show "$1:crates/zed/Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+          base_version=$(zed_version "$BASE_TAG")
+          target_version=$(zed_version "$target")
+          review_branch="datazed-update/$target"
+          run=true
+          if [ "$(git rev-parse "$target^{commit}")" = "$(git rev-parse "$BASE_TAG^{commit}")" ]; then
+            reason="r-tools is already based on $target."
+            run=false
+          elif [ -z "$TARGET_INPUT" ] && [ "$(printf '%s\n%s\n' "$target_version" "$base_version" | sort -V | tail -1)" = "$base_version" ]; then
+            reason="The newest release, $target ($target_version), is not newer than the base ($base_version)."
+            run=false
+          elif git ls-remote --exit-code --heads origin "$review_branch" >/dev/null; then
+            reason="$review_branch already exists."
+            run=false
+          fi
+          if [ "$run" = false ]; then echo "$reason Nothing to do." >> "$GITHUB_STEP_SUMMARY"; fi
+          {
+            echo "run=$run"
+            echo "target=$target"
+            echo "review_branch=$review_branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space
+        if: steps.target.outputs.run == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install Linux build dependencies
+        if: steps.target.outputs.run == 'true'
+        run: ./script/linux
+
+      - name: Rebase r-tools onto the release
+        if: steps.target.outputs.run == 'true'
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+          REVIEW_BRANCH: ${{ steps.target.outputs.review_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --quiet -c "$REVIEW_BRANCH"
+          rebasing() { [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; }
+          if ! git rebase --onto "$TARGET" "$BASE_TAG"; then
+            # Same handling as update-datazed.sh: Cargo.lock conflicts are
+            # mechanical, anything else needs a person.
+            while rebasing; do
+              conflicted=$(git diff --name-only --diff-filter=U)
+              if [ "$conflicted" = "Cargo.lock" ]; then
+                git checkout --ours Cargo.lock
+                cargo metadata --format-version 1 >/dev/null
+                git add Cargo.lock
+                GIT_EDITOR=true git rebase --continue || true
+              elif [ -z "$conflicted" ]; then
+                GIT_EDITOR=true git rebase --continue || true
+              else
+                {
+                  echo "Rebasing onto $TARGET stopped on conflicts in:"
+                  echo '```'
+                  echo "$conflicted"
+                  echo '```'
+                  echo "Resolve them locally: \`update-datazed.sh $TARGET\`."
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+            done
+          fi
+
+      - name: Check repl and r_tools
+        if: steps.target.outputs.run == 'true'
+        run: |
+          cargo clippy -p repl -p r_tools --tests --no-deps
+          cargo test -p repl -p r_tools
+
+      - name: Push the review branch
+        if: steps.target.outputs.run == 'true'
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+          REVIEW_BRANCH: ${{ steps.target.outputs.review_branch }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain --untracked-files=no -- Cargo.lock)" ]; then
+            git add Cargo.lock
+            git commit --quiet -m "Cargo.lock: re-resolve after rebasing onto $TARGET"
+          fi
+          git push origin "HEAD:refs/heads/$REVIEW_BRANCH"
+          {
+            echo "Rebased r-tools onto $TARGET; clippy and the repl and r_tools tests pass."
+            echo "Review branch: \`$REVIEW_BRANCH\`."
+            echo "To adopt it, run \`update-datazed.sh $TARGET --push\` on the Mac that builds DataZed."
+          } >> "$GITHUB_STEP_SUMMARY"
