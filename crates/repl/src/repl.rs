@@ -24,7 +24,7 @@ pub use crate::repl_sessions_ui::{
 };
 pub use crate::repl_settings::ReplSettings;
 pub use crate::repl_store::ReplStore;
-pub use crate::session::Session;
+pub use crate::session::{KernelMessage, Session, SessionEvent};
 
 pub const KERNEL_DOCS_URL: &str = "https://zed.dev/docs/repl#changing-kernels";
 
