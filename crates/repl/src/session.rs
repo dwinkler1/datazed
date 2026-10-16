@@ -220,7 +220,17 @@ impl EditorBlock {
                         .mr(editor_margins.right)
                         .pr_2()
                         .when_some(output_max_height, |div, max_h| {
-                            div.max_h(max_h).overflow_y_scroll()
+                            // gpui's own scroll listener lets the event bubble, so without
+                            // this the editor scrolls along with the output area.
+                            let scroll_handle = execution_view.read(cx.app).scroll_handle.clone();
+                            div.max_h(max_h)
+                                .overflow_y_scroll()
+                                .track_scroll(&scroll_handle)
+                                .on_scroll_wheel(move |_, _, cx| {
+                                    if scroll_handle.max_offset().y > Pixels::ZERO {
+                                        cx.stop_propagation();
+                                    }
+                                })
                         })
                         .child(execution_view),
                 )
