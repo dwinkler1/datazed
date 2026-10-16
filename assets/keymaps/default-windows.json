@@ -1707,6 +1707,7 @@
     "bindings": {
       "ctrl-enter": "repl::Run",
       "ctrl-alt-shift-enter": "r_tools::SendToTerminal",
+      "ctrl-alt-p": "r_tools::OpenPlots",
     },
   },
 ]

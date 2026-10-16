@@ -36,7 +36,7 @@ use language::Point;
 use project::Fs;
 use runtimelib::{
     ExecuteRequest, ExecutionState, InputReply, InterruptRequest, JupyterMessage,
-    JupyterMessageContent, KernelInfoRequest, ReplyStatus, ShutdownRequest,
+    JupyterMessageContent, KernelInfoRequest, MediaType, ReplyStatus, ShutdownRequest,
 };
 use settings::Settings as _;
 use std::{env::temp_dir, ops::Range, sync::Arc, time::Duration};
@@ -49,6 +49,9 @@ pub struct Session {
     editor: WeakEntity<Editor>,
     pub kernel: Kernel,
     pub kernel_specification: KernelSpecification,
+    /// Set while a plots pane shows this session's R plots; `route` then
+    /// skips their inline copy.
+    pub plots_shown_in_pane: bool,
 
     blocks: HashMap<String, EditorBlock>,
     result_inlays: HashMap<String, (InlayId, Range<Anchor>, usize)>,
@@ -258,6 +261,7 @@ impl Session {
             result_inlays: HashMap::default(),
             next_inlay_id: 0,
             kernel_specification,
+            plots_shown_in_pane: false,
             _subscriptions: vec![subscription],
         };
 
@@ -1024,6 +1028,24 @@ impl KernelSession for Session {
                         execution_view.update_display_data(&update.data, &display_id, window, cx);
                     });
                 });
+                return;
+            }
+            // A plots pane following this session got the plot through the
+            // KernelMessage event above; skip the inline copy unless
+            // `repl.inline_r_plots` is set.
+            JupyterMessageContent::DisplayData(display)
+                if self.plots_shown_in_pane
+                    && !ReplSettings::get_global(cx).inline_r_plots
+                    && self
+                        .kernel_specification
+                        .language()
+                        .eq_ignore_ascii_case("r")
+                    && display
+                        .data
+                        .content
+                        .iter()
+                        .any(|media| matches!(media, MediaType::Png(_))) =>
+            {
                 return;
             }
             _ => {}

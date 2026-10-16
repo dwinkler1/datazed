@@ -1504,6 +1504,11 @@ pub struct ReplSettingsContent {
     ///
     /// Default: 0
     pub output_max_height_lines: Option<usize>,
+    /// Whether R kernels' PNG plots are also shown inline under the code.
+    /// When false, they appear only in the plots pane.
+    ///
+    /// Default: false
+    pub inline_r_plots: Option<bool>,
 }
 
 /// Settings for configuring the tab switcher behaviour.

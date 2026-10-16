@@ -27,6 +27,11 @@ pub struct ReplSettings {
     ///
     /// Default: 0
     pub output_max_height_lines: usize,
+    /// Whether R kernels' PNG plots are also shown inline under the code.
+    /// When false, they appear only in the plots pane.
+    ///
+    /// Default: false
+    pub inline_r_plots: bool,
 }
 
 impl Settings for ReplSettings {
@@ -39,6 +44,7 @@ impl Settings for ReplSettings {
             inline_output: repl.inline_output.unwrap_or(true),
             inline_output_max_length: repl.inline_output_max_length.unwrap_or(50),
             output_max_height_lines: repl.output_max_height_lines.unwrap_or(0),
+            inline_r_plots: repl.inline_r_plots.unwrap_or(false),
         }
     }
 }
