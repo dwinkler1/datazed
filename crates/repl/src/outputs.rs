@@ -34,7 +34,7 @@
 //! interpreting and displaying various types of Jupyter output.
 
 use editor::{Editor, MultiBuffer};
-use gpui::{AnyElement, ClipboardItem, Entity, EventEmitter, Render, WeakEntity};
+use gpui::{AnyElement, ClipboardItem, Entity, EventEmitter, Render, ScrollHandle, WeakEntity};
 use language::Buffer;
 use menu;
 use runtimelib::{ExecutionState, JupyterMessage, JupyterMessageContent, MimeBundle, MimeType};
@@ -482,6 +482,8 @@ pub struct ExecutionView {
     pub outputs: Vec<Output>,
     pub status: ExecutionStatus,
     pending_input: Option<PendingInput>,
+    /// Tracks the editor output block's scroll area when its height is capped.
+    pub scroll_handle: ScrollHandle,
 }
 
 impl EventEmitter<ExecutionViewFinishedEmpty> for ExecutionView {}
@@ -499,6 +501,7 @@ impl ExecutionView {
             outputs: Default::default(),
             status,
             pending_input: None,
+            scroll_handle: ScrollHandle::new(),
         }
     }
 
