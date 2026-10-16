@@ -482,12 +482,16 @@ impl Session {
         }
     }
 
-    fn send(&mut self, message: JupyterMessage, _cx: &mut Context<Self>) -> anyhow::Result<()> {
-        if let Kernel::RunningKernel(kernel) = &mut self.kernel {
-            kernel.request_tx().try_send(message).ok();
-        }
-
-        anyhow::Ok(())
+    /// Sends a request to the kernel. Fails when no kernel is running or the
+    /// request channel is closed or full, so callers know it was not sent.
+    pub fn send(&mut self, message: JupyterMessage, _cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let Kernel::RunningKernel(kernel) = &mut self.kernel else {
+            anyhow::bail!("the kernel is not running");
+        };
+        kernel
+            .request_tx()
+            .try_send(message)
+            .context("the kernel's request channel is closed or full")
     }
 
     fn send_stdin_reply(

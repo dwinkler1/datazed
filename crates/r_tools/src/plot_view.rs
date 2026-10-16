@@ -104,6 +104,11 @@ impl PlotView {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn plot_count(&self) -> usize {
+        self.plots.len()
+    }
+
     fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
         if forward {
             self.current = (self.current + 1).min(self.plots.len().saturating_sub(1));
