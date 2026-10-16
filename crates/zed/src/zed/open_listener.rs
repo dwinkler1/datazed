@@ -155,6 +155,11 @@ impl OpenRequest {
         }
 
         for url in request.urls {
+            // DataZed's own scheme: a datazed:// link does what the zed:// link does.
+            let url = match url.strip_prefix("datazed://") {
+                Some(rest) => format!("zed://{rest}"),
+                None => url,
+            };
             if let Some(server_name) = url.strip_prefix("zed-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {
@@ -1632,6 +1637,33 @@ mod tests {
                 "expected is_focus_app_only for {url}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn test_parse_datazed_url(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+
+        let parse = |url: &str, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                OpenRequest::parse(
+                    RawOpenRequest {
+                        urls: vec![url.into()],
+                        ..Default::default()
+                    },
+                    cx,
+                )
+                .unwrap()
+                .kind
+            })
+        };
+        assert!(matches!(
+            parse("datazed://open", cx),
+            Some(OpenRequestKind::FocusApp)
+        ));
+        assert!(matches!(
+            parse("datazed://settings", cx),
+            Some(OpenRequestKind::Setting { setting_path: None })
+        ));
     }
 
     #[gpui::test]

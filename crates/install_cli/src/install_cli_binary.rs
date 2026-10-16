@@ -1,4 +1,3 @@
-use super::register_zed_scheme;
 use anyhow::Result;
 use gpui::{AppContext as _, AsyncApp, Context, PromptLevel, Window, actions};
 use release_channel::ReleaseChannel;
@@ -25,7 +24,7 @@ const CANT_INSTALL_DOCS_URL: &str = "https://zed.dev/docs/macos#cant-install-cli
 /// commonly because the user is not an admin.
 async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
     let cli_path = cx.update(|cx| cx.path_for_auxiliary_executable("cli"))?;
-    let link_path = Path::new("/usr/local/bin/zed");
+    let link_path = Path::new("/usr/local/bin/datazed");
     let bin_dir_path = link_path.parent().unwrap();
 
     // Don't re-create symlink if it points to the same CLI binary.
@@ -108,7 +107,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                         |cx| {
                             cx.new(|cx| {
                                 MessageNotification::new(
-                                    "You can add `zed` to your PATH manually.",
+                                    "You can add `datazed` to your PATH manually.",
                                     cx,
                                 )
                                 .with_title("Couldn't install the Zed CLI")
@@ -129,7 +128,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 Toast::new(
                     NotificationId::unique::<InstalledZedCli>(),
                     format!(
-                        "Installed `zed` to {}. You can launch {} from your terminal.",
+                        "Installed `datazed` to {}. You can launch {} from your terminal.",
                         path.to_string_lossy(),
                         ReleaseChannel::global(cx).display_name()
                     ),
@@ -137,7 +136,6 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 cx,
             )
         })?;
-        register_zed_scheme(cx).await.log_err();
         Ok(())
     })
     .detach_and_prompt_err("Cannot install the Zed CLI", window, cx, |_, _, _| None);

@@ -50,8 +50,9 @@ fn new(cx: &App) -> Arc<dyn CredentialsProvider> {
             // keychain access prompts.
             //
             // However, if the `ZED_DEVELOPMENT_USE_KEYCHAIN` environment
-            // variable is set, we will use the actual keychain.
-            !*ZED_DEVELOPMENT_USE_KEYCHAIN
+            // variable is set, we will use the actual keychain. Release
+            // builds of the Dev channel, which DataZed ships as, always do.
+            cfg!(debug_assertions) && !*ZED_DEVELOPMENT_USE_KEYCHAIN
         }
         Some(ReleaseChannel::Nightly | ReleaseChannel::Preview | ReleaseChannel::Stable) | None => {
             false
