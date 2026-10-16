@@ -919,6 +919,10 @@ pub enum SessionEvent {
 
 impl EventEmitter<SessionEvent> for Session {}
 
+pub struct KernelMessage(pub Arc<JupyterMessage>);
+
+impl EventEmitter<KernelMessage> for Session {}
+
 impl Render for Session {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, interrupt_button) = match &self.kernel {
@@ -977,6 +981,15 @@ impl Render for Session {
 
 impl KernelSession for Session {
     fn route(&mut self, message: &JupyterMessage, window: &mut Window, cx: &mut Context<Self>) {
+        // Only r_tools subscribes, so other kernels skip the copy.
+        if self
+            .kernel_specification
+            .language()
+            .eq_ignore_ascii_case("r")
+        {
+            cx.emit(KernelMessage(Arc::new(message.clone())));
+        }
+
         let parent_message_id = match message.parent_header.as_ref() {
             Some(header) => &header.msg_id,
             None => return,
