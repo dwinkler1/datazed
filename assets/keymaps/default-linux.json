@@ -1694,6 +1694,7 @@
       "ctrl-alt-shift-enter": "r_tools::SendToTerminal",
       "ctrl-alt-v": "r_tools::ToggleVariables",
       "ctrl-alt-p": "r_tools::OpenPlots",
+      "ctrl-alt-c": "r_tools::OpenConsole",
     },
   },
 ]

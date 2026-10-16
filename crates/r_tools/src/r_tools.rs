@@ -3,10 +3,15 @@ mod variables_panel;
 
 use std::sync::Arc;
 
+use collections::HashMap;
+
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Window, actions};
 use jupyter_protocol::JupyterMessage;
 use repl::{Kernel, KernelMessage, ReplStore, Session, SessionEvent};
+use task::{
+    HideStrategy, RevealStrategy, RevealTarget, SaveStrategy, Shell, SpawnInTerminal, TaskId,
+};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use workspace::{Toast, Workspace, dock::Panel as _, notifications::NotificationId};
 
@@ -18,10 +23,12 @@ actions!(
     [
         /// Toggles the R variables panel.
         ToggleVariables,
-        /// Opens the R plot viewer in a split pane.
+        /// Opens the R plots pane in a split to the right, or activates it if it is open.
         OpenPlots,
-        /// Sends the current top-level expression or selection to the active terminal.
+        /// Sends the selection, or the top-level R statement at the cursor, to the active terminal if it runs R.
         SendToTerminal,
+        /// Opens a Jupyter console in a terminal, attached to the R session.
+        OpenConsole,
     ]
 );
 
@@ -40,8 +47,14 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &ToggleVariables, window, cx| {
             workspace.toggle_panel_focus::<VariablesPanel>(window, cx);
         });
-        workspace.register_action(move |workspace, _: &OpenPlots, window, cx| {
-            plot_view::open_plot_view(workspace, &tracker, window, cx);
+        workspace.register_action({
+            let tracker = tracker.clone();
+            move |workspace, _: &OpenPlots, window, cx| {
+                plot_view::open_plot_view(workspace, &tracker, window, cx);
+            }
+        });
+        workspace.register_action(move |workspace, _: &OpenConsole, window, cx| {
+            open_console(workspace, &tracker, window, cx);
         });
         workspace.register_action(send_to_terminal);
     })
@@ -140,6 +153,83 @@ impl SessionTracker {
     }
 }
 
+/// Runs `jupyter-console --existing` through uvx on the R kernel's connection
+/// file, so the console shares the session with the editor, the plots pane and
+/// the variables panel. uvx fetches jupyter-console on first use. jupyter-console
+/// can also echo other clients' input (`include_other_output`), but that adds
+/// stray prompts, so it stays off; SendToTerminal sends editor code to the
+/// console instead.
+fn open_console(
+    workspace: &mut Workspace,
+    tracker: &Entity<SessionTracker>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    struct NoRSession;
+
+    let kernel_files =
+        tracker
+            .read(cx)
+            .running_session(cx)
+            .and_then(|session| match &session.read(cx).kernel {
+                Kernel::RunningKernel(kernel) => Some((
+                    kernel.connection_file()?.to_path_buf(),
+                    kernel.working_directory().clone(),
+                )),
+                _ => None,
+            });
+    let Some((connection_file, working_directory)) = kernel_files else {
+        workspace.show_toast(
+            Toast::new(
+                NotificationId::unique::<NoRSession>(),
+                "Run some R code to start the R session.",
+            )
+            .autohide(),
+            cx,
+        );
+        return;
+    };
+
+    // The terminal joins command and arguments into one shell command line,
+    // so a path with spaces must be quoted for the system shell it runs in.
+    let Some(connection_file_arg) = util::shell::ShellKind::system()
+        .try_quote(&connection_file.to_string_lossy())
+        .map(|quoted| quoted.into_owned())
+    else {
+        log::error!("cannot quote the kernel connection file {connection_file:?} for the shell");
+        return;
+    };
+    let args = vec![
+        "--from".to_string(),
+        "jupyter-console".to_string(),
+        "jupyter-console".to_string(),
+        "--existing".to_string(),
+        connection_file_arg,
+    ];
+    let command_label = format!("uvx {}", args.join(" "));
+    let spawn = SpawnInTerminal {
+        id: TaskId("r_tools_console".to_string()),
+        full_label: command_label.clone(),
+        label: "R console".to_string(),
+        command: Some("uvx".to_string()),
+        args,
+        command_label,
+        cwd: Some(working_directory),
+        env: HashMap::default(),
+        use_new_terminal: true,
+        allow_concurrent_runs: true,
+        reveal: RevealStrategy::Always,
+        reveal_target: RevealTarget::Dock,
+        hide: HideStrategy::Never,
+        shell: Shell::System,
+        show_summary: false,
+        show_command: false,
+        show_rerun: false,
+        save: SaveStrategy::default(),
+    };
+    workspace.spawn_in_terminal(spawn, window, cx).detach();
+}
+
 fn send_to_terminal(
     workspace: &mut Workspace,
     _: &SendToTerminal,
@@ -148,11 +238,11 @@ fn send_to_terminal(
 ) {
     struct NoTerminal;
 
-    /// Whether a terminal's foreground process is an R console (R or radian).
-    /// Code is pasted only into these, so a shell never runs R code (where
-    /// `x > y` would overwrite `y`).
+    /// Whether a terminal's foreground process is an R console: R, radian, or
+    /// the jupyter-console that OpenConsole starts. Code is pasted only into
+    /// these, so a shell never runs R code (where `x > y` would overwrite `y`).
     fn is_r_console(name: &str, argv: &[String]) -> bool {
-        const CONSOLES: [&str; 3] = ["r", "rterm", "radian"];
+        const CONSOLES: [&str; 4] = ["r", "rterm", "radian", "jupyter-console"];
         std::iter::once(name)
             .chain(argv.iter().map(String::as_str))
             .filter_map(|arg| std::path::Path::new(arg).file_name()?.to_str())
@@ -180,7 +270,7 @@ fn send_to_terminal(
         workspace.show_toast(
             Toast::new(
                 NotificationId::unique::<NoTerminal>(),
-                "The active terminal is not running R. Start R or radian there first.",
+                "The active terminal is not running R. Start R, radian or the R console there first.",
             )
             .autohide(),
             cx,
@@ -285,13 +375,24 @@ mod tests {
         cx.run_until_parked();
 
         workspace.read_with(cx, |workspace, cx| {
-            assert!(workspace.left_dock().read(cx).panel::<VariablesPanel>().is_some());
-            assert!(workspace.right_dock().read(cx).panel::<VariablesPanel>().is_none());
+            assert!(
+                workspace
+                    .left_dock()
+                    .read(cx)
+                    .panel::<VariablesPanel>()
+                    .is_some()
+            );
+            assert!(
+                workspace
+                    .right_dock()
+                    .read(cx)
+                    .panel::<VariablesPanel>()
+                    .is_none()
+            );
         });
         cx.run_until_parked();
-        let saved = cx.update(|_, cx| {
-            db::kvp::KeyValueStore::global(cx).read_kvp("r_variables_panel_dock")
-        });
+        let saved = cx
+            .update(|_, cx| db::kvp::KeyValueStore::global(cx).read_kvp("r_variables_panel_dock"));
         assert_eq!(saved.ok().flatten().as_deref(), Some("left"));
 
         let tracker = panel.read_with(cx, |panel, _| panel.tracker().clone());

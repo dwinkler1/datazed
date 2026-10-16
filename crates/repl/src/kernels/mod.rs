@@ -1,5 +1,9 @@
 mod native_kernel;
-use std::{fmt::Debug, future::Future, path::PathBuf};
+use std::{
+    fmt::Debug,
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 use futures::{channel::mpsc, future::Shared};
 use gpui::{App, Entity, Task, Window};
@@ -672,6 +676,11 @@ pub trait RunningKernel: Send + Debug {
     fn set_kernel_info(&mut self, info: KernelInfoReply);
     fn force_shutdown(&mut self, window: &mut Window, cx: &mut App) -> Task<anyhow::Result<()>>;
     fn kill(&mut self);
+    /// The connection file another Jupyter client can use to attach to this
+    /// kernel; `None` for kernels that do not run on this machine.
+    fn connection_file(&self) -> Option<&Path> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
