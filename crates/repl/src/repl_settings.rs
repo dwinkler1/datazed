@@ -8,6 +8,12 @@ pub struct ReplSettings {
     ///
     /// Default: 32
     pub max_lines: usize,
+    /// Languages whose code `repl::Run` sends by top-level syntax node: the
+    /// selection, or the statement at the cursor, instead of the block of
+    /// non-blank lines around it.
+    ///
+    /// Default: ["R", "Python", "Julia"]
+    pub run_by_statement: Vec<String>,
     /// Maximum number of columns to keep in REPL's scrollback buffer.
     /// Clamped with [20, 512] range.
     ///
@@ -35,6 +41,7 @@ impl Settings for ReplSettings {
 
         Self {
             max_lines: repl.max_lines.unwrap(),
+            run_by_statement: repl.run_by_statement.clone().unwrap_or_default(),
             max_columns: repl.max_columns.unwrap(),
             inline_output: repl.inline_output.unwrap_or(true),
             inline_output_max_length: repl.inline_output_max_length.unwrap_or(50),
