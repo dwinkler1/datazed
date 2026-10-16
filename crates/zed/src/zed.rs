@@ -5961,6 +5961,7 @@ mod tests {
                 "project_search",
                 "project_symbols",
                 "projects",
+                "r_tools",
                 "recent_projects",
                 "remote_debug",
                 "repl",
@@ -6216,6 +6217,7 @@ mod tests {
             );
 
             repl::init(app_state.fs.clone(), cx);
+            r_tools::init(cx);
             repl::notebook::init(cx);
             tasks_ui::init(cx);
             project::debugger::breakpoint_store::BreakpointStore::init(

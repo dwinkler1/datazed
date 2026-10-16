@@ -1785,6 +1785,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "cmd-enter": "repl::Run",
+      "ctrl-cmd-enter": "r_tools::SendToTerminal",
     },
   },
 ]
