@@ -16,7 +16,7 @@ use std::{
     env,
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -294,6 +294,10 @@ impl RunningKernel for NativeRunningKernel {
         self.request_tx.close_channel();
         self.stdin_tx.close_channel();
         self.process.kill().ok();
+    }
+
+    fn connection_file(&self) -> Option<&Path> {
+        Some(&self.connection_path)
     }
 }
 
