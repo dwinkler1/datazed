@@ -1691,6 +1691,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-enter": "repl::Run",
+      "ctrl-alt-shift-enter": "r_tools::SendToTerminal",
     },
   },
 ]

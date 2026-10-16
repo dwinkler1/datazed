@@ -577,7 +577,7 @@ fn jupytext_cells(
     (snippets, None)
 }
 
-fn runnable_ranges(
+pub fn runnable_ranges(
     buffer: &BufferSnapshot,
     range: Range<Point>,
     cx: &mut App,

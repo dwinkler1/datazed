@@ -6215,6 +6215,7 @@ mod tests {
             );
 
             repl::init(app_state.fs.clone(), cx);
+            r_tools::init(cx);
             repl::notebook::init(cx);
             tasks_ui::init(cx);
             project::debugger::breakpoint_store::BreakpointStore::init(

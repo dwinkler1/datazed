@@ -2984,6 +2984,18 @@ impl Terminal {
         }
     }
 
+    /// The executable name and arguments of the foreground process, if known.
+    pub fn foreground_process(&self) -> Option<(String, Vec<String>)> {
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info
+                .current
+                .read()
+                .as_ref()
+                .map(|process| (process.name.clone(), process.argv.clone())),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     /// Normalizes the command name of the foreground process, if one is known.
     pub fn foreground_process_command_name(&self) -> Option<String> {
         match &self.terminal_type {
