@@ -1701,4 +1701,11 @@
       "right": ["tabular_data::MoveFocusedCell", { "direction": "right" }],
     },
   },
+  {
+    "context": "Editor && extension == r",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-enter": "repl::Run",
+    },
+  },
 ]
