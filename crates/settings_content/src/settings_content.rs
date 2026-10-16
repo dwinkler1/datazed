@@ -1518,6 +1518,11 @@ pub struct ReplSettingsContent {
     ///
     /// Default: 0
     pub output_max_height_lines: Option<usize>,
+    /// Whether PNG plots of the session the plots pane follows are also shown
+    /// inline under the code. When false, they appear only in the plots pane.
+    ///
+    /// Default: false
+    pub inline_plots: Option<bool>,
 }
 
 /// Settings for configuring the tab switcher behaviour.
