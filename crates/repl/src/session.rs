@@ -49,6 +49,9 @@ pub struct Session {
     editor: WeakEntity<Editor>,
     pub kernel: Kernel,
     pub kernel_specification: KernelSpecification,
+    /// Set while another crate follows this session; `route` emits
+    /// [`KernelMessage`] events only then.
+    pub followed: bool,
 
     blocks: HashMap<String, EditorBlock>,
     result_inlays: HashMap<String, (InlayId, Range<Anchor>, usize)>,
@@ -258,6 +261,7 @@ impl Session {
             result_inlays: HashMap::default(),
             next_inlay_id: 0,
             kernel_specification,
+            followed: false,
             _subscriptions: vec![subscription],
         };
 
@@ -919,6 +923,10 @@ pub enum SessionEvent {
 
 impl EventEmitter<SessionEvent> for Session {}
 
+pub struct KernelMessage(pub Arc<JupyterMessage>);
+
+impl EventEmitter<KernelMessage> for Session {}
+
 impl Render for Session {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, interrupt_button) = match &self.kernel {
@@ -977,6 +985,11 @@ impl Render for Session {
 
 impl KernelSession for Session {
     fn route(&mut self, message: &JupyterMessage, window: &mut Window, cx: &mut Context<Self>) {
+        // Only followed sessions have subscribers; others skip the copy.
+        if self.followed {
+            cx.emit(KernelMessage(Arc::new(message.clone())));
+        }
+
         let parent_message_id = match message.parent_header.as_ref() {
             Some(header) => &header.msg_id,
             None => return,
