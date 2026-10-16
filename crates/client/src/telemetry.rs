@@ -89,13 +89,16 @@ static ZED_CLIENT_CHECKSUM_SEED: LazyLock<Option<Vec<u8>>> = LazyLock::new(|| {
         })
 });
 
-pub static MINIDUMP_ENDPOINT: LazyLock<Option<String>> = LazyLock::new(|| {
-    option_env!("ZED_MINIDUMP_ENDPOINT")
-        .map(str::to_string)
-        .or_else(|| env::var("ZED_MINIDUMP_ENDPOINT").ok())
-});
+/// Always `None` in DataZed, so crash and panic reports are never sent to Zed,
+/// whatever `ZED_MINIDUMP_ENDPOINT` says at build time or at runtime.
+pub static MINIDUMP_ENDPOINT: LazyLock<Option<String>> = LazyLock::new(|| None);
 
 pub fn should_install_crash_handler(channel: ReleaseChannel) -> bool {
+    // DataZed, the stable channel, writes no minidumps: they would land in the
+    // logs folder it shares with Zed, which uploads every one it finds there.
+    if channel == ReleaseChannel::Stable {
+        return false;
+    }
     matches!(
         env::var("ZED_GENERATE_MINIDUMPS").as_deref(),
         Ok("true" | "1")
@@ -568,7 +571,9 @@ impl Telemetry {
         // RUST_LOG=telemetry=trace to debug telemetry events
         log::trace!(target: "telemetry", "{:?}", event);
 
-        if !state.settings.metrics {
+        // DataZed, the stable channel, sends no events: Zed would count them as
+        // its own stable release's.
+        if !state.settings.metrics || state.release_channel == Some(ReleaseChannel::Stable) {
             return;
         }
 

@@ -47,7 +47,7 @@ pub fn app_identifier() -> &'static str {
         ReleaseChannel::Dev => "Zed-Editor-Dev",
         ReleaseChannel::Nightly => "Zed-Editor-Nightly",
         ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Stable => "DataZed",
     }
 }
 
@@ -197,9 +197,10 @@ impl ReleaseChannel {
             .map(|channel| channel.0)
     }
 
-    /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
+    /// Returns whether we want to poll for updates for this [`ReleaseChannel`].
+    /// Never for DataZed: an update would install Zed over it.
     pub fn poll_for_updates(&self) -> bool {
-        !matches!(self, ReleaseChannel::Dev)
+        false
     }
 
     /// Returns the display name for this [`ReleaseChannel`].
@@ -208,7 +209,7 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "Zed Dev",
             ReleaseChannel::Nightly => "Zed Nightly",
             ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Stable => "DataZed",
         }
     }
 
@@ -230,7 +231,7 @@ impl ReleaseChannel {
             ReleaseChannel::Dev => "dev.zed.Zed-Dev",
             ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
             ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Stable => "org.dwinkler.DataZed",
         }
     }
 

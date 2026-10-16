@@ -146,7 +146,12 @@ pub trait DbScope {
 
 impl DbScope for ReleaseChannel {
     fn scope_name(&self) -> &str {
-        self.dev_name()
+        match self {
+            // DataZed, built on the stable channel, keeps its own database
+            // instead of sharing Zed's or a Zed Dev build's.
+            ReleaseChannel::Stable => "datazed",
+            _ => self.dev_name(),
+        }
     }
 }
 

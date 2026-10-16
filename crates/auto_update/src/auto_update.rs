@@ -326,6 +326,13 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
         .map(|channel| channel.poll_for_updates())
         .unwrap_or(false)
     {
+        drop(window.prompt(
+            gpui::PromptLevel::Info,
+            "DataZed does not update itself.",
+            Some("Zed's updater would install Zed over it. Rebuild DataZed with script/update-datazed or the datazed-update skill."),
+            &["OK"],
+            cx,
+        ));
         return;
     }
 
@@ -1368,7 +1375,7 @@ mod tests {
         rc::Rc,
         sync::{
             Arc,
-            atomic::{self, AtomicBool},
+            atomic::{self, AtomicBool, AtomicUsize},
         },
     };
     use tempfile::tempdir;
@@ -1399,6 +1406,33 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_stable_never_polls(cx: &mut TestAppContext) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            settings::init(cx);
+            release_channel::init_test(semver::Version::new(0, 100, 0), ReleaseChannel::Stable, cx);
+            let requests = Arc::clone(&requests);
+            let fake_client_http = FakeHttpClient::create(move |_| {
+                requests.fetch_add(1, atomic::Ordering::SeqCst);
+                async { Ok(Response::builder().status(404).body("".into()).unwrap()) }
+            });
+            let client = Client::new(Arc::new(FakeSystemClock::new()), fake_client_http, cx);
+            crate::init(client, cx);
+        });
+        let auto_updater = cx.update(|cx| AutoUpdater::get(cx).expect("auto updater should exist"));
+
+        cx.background_executor.advance_clock(POLL_INTERVAL * 2);
+        cx.run_until_parked();
+
+        // DataZed: Zed's updater would install Zed over it, so it never asks.
+        assert_eq!(requests.load(atomic::Ordering::SeqCst), 0);
+        auto_updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle)
+        });
+    }
+
+    #[gpui::test]
+    #[ignore = "DataZed: the stable channel never polls, so this waits forever"]
     async fn test_auto_update_downloads(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
         zlog::init_test();
