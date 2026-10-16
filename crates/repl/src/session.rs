@@ -36,7 +36,7 @@ use language::Point;
 use project::Fs;
 use runtimelib::{
     ExecuteRequest, ExecutionState, InputReply, InterruptRequest, JupyterMessage,
-    JupyterMessageContent, KernelInfoRequest, ReplyStatus, ShutdownRequest,
+    JupyterMessageContent, KernelInfoRequest, MediaType, ReplyStatus, ShutdownRequest,
 };
 use settings::Settings as _;
 use std::{env::temp_dir, ops::Range, sync::Arc, time::Duration};
@@ -50,7 +50,8 @@ pub struct Session {
     pub kernel: Kernel,
     pub kernel_specification: KernelSpecification,
     /// Set while another crate follows this session; `route` emits
-    /// [`KernelMessage`] events only then.
+    /// [`KernelMessage`] events only then, and leaves PNG plots to the plots
+    /// pane instead of showing them inline (unless `repl.inline_plots`).
     pub followed: bool,
 
     blocks: HashMap<String, EditorBlock>,
@@ -1024,6 +1025,20 @@ impl KernelSession for Session {
                         execution_view.update_display_data(&update.data, &display_id, window, cx);
                     });
                 });
+                return;
+            }
+            // The plots pane following this session got the plot through the
+            // KernelMessage event above; skip the inline copy unless
+            // `repl.inline_plots` is set.
+            JupyterMessageContent::DisplayData(display)
+                if self.followed
+                    && !ReplSettings::get_global(cx).inline_plots
+                    && display
+                        .data
+                        .content
+                        .iter()
+                        .any(|media| matches!(media, MediaType::Png(_))) =>
+            {
                 return;
             }
             _ => {}
