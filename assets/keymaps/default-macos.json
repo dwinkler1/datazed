@@ -1780,4 +1780,11 @@
       "right": ["tabular_data::MoveFocusedCell", { "direction": "right" }],
     },
   },
+  {
+    "context": "Editor && jupyter && (extension == r || extension == py || extension == jl)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-enter": "repl::Run",
+    },
+  },
 ]

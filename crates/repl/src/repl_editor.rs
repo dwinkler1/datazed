@@ -14,9 +14,10 @@ use crate::kernels::PythonEnvKernelSpecification;
 use crate::repl_store::ReplStore;
 use crate::session::SessionEvent;
 use crate::{
-    ClearCurrentOutput, ClearOutputs, Interrupt, JupyterSettings, KernelSpecification, Restart,
-    Session, Shutdown,
+    ClearCurrentOutput, ClearOutputs, Interrupt, JupyterSettings, KernelSpecification,
+    ReplSettings, Restart, Session, Shutdown,
 };
+use settings::Settings as _;
 
 pub fn assign_kernelspec(
     kernel_specification: KernelSpecification,
@@ -588,9 +589,34 @@ fn runnable_ranges(
         return (markdown_code_blocks(buffer, range, cx), None);
     }
 
+    // Languages listed in `repl.run_by_statement` run by top-level syntax node.
+    let by_statement = buffer.language().is_some_and(|language| {
+        let name = language.name();
+        ReplSettings::try_get(cx).is_some_and(|settings| {
+            settings
+                .run_by_statement
+                .iter()
+                .any(|listed| listed.as_str() == name.as_ref())
+        })
+    });
+    if by_statement && range.start != range.end {
+        // A line-wise selection ends at column 0 of the following row; that
+        // row does not run, so the output goes under the last selected line.
+        let mut range = range;
+        if range.end.column == 0 && range.end.row > range.start.row {
+            let last_row = range.end.row - 1;
+            range.end = Point::new(last_row, buffer.line_len(last_row));
+        }
+        return (vec![range], None);
+    }
+
     let (jupytext_snippets, next_cursor) = jupytext_cells(buffer, range.clone());
     if !jupytext_snippets.is_empty() {
         return (jupytext_snippets, next_cursor);
+    }
+
+    if by_statement && let Some(statement) = top_level_statement_at(buffer, range.start) {
+        return statement;
     }
 
     let snippet_range = cell_range(buffer, range.start.row, range.end.row);
@@ -635,6 +661,71 @@ fn runnable_ranges(
     } else {
         (Vec::new(), None)
     }
+}
+
+fn top_level_statement_at(
+    buffer: &BufferSnapshot,
+    cursor: Point,
+) -> Option<(Vec<Range<Point>>, Option<Point>)> {
+    let root = buffer.syntax_layers().next()?.node();
+    let mut tree_cursor = root.walk();
+    let mut statements = Vec::new();
+    if tree_cursor.goto_first_child() {
+        loop {
+            let node = tree_cursor.node();
+            // Grammars list comments as extras, so this skips them in any language.
+            if node.is_named() && !node.is_extra() {
+                let range = node.start_byte()..with_trailing_semicolon(buffer, node.end_byte());
+                statements.push((range, node.has_error()));
+            }
+            if !tree_cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    let row_of = |offset: usize| buffer.offset_to_point(offset).row;
+    let cursor_offset = buffer.point_to_offset(cursor);
+    let containing_or_after = statements
+        .iter()
+        .position(|(statement, _)| statement.end > cursor_offset);
+    let last_ending_on_cursor_row = statements
+        .iter()
+        .rposition(|(statement, _)| row_of(statement.end) == cursor.row);
+    let target = match (containing_or_after, last_ending_on_cursor_row) {
+        (Some(after), Some(on_row)) if row_of(statements[after].0.start) > cursor.row => on_row,
+        (Some(after), _) => after,
+        (None, on_row) => match on_row {
+            Some(on_row) => on_row,
+            None => return Some((Vec::new(), None)),
+        },
+    };
+
+    let (statement, has_error) = &statements[target];
+    // A syntax error can make one node span the rest of the buffer; run the
+    // cursor's line instead, as for other languages.
+    if *has_error {
+        return None;
+    }
+    let range = buffer.offset_to_point(statement.start)..buffer.offset_to_point(statement.end);
+    let next = statements
+        .get(target + 1)
+        .map(|(next, _)| buffer.offset_to_point(next.start));
+    Some((vec![range], next))
+}
+
+/// Grammars leave a statement's `;` outside its node, but IPython and IJulia
+/// read it: a trailing `;` hides the statement's result.
+fn with_trailing_semicolon(buffer: &BufferSnapshot, end: usize) -> usize {
+    let mut offset = end;
+    for c in buffer.chars_at(end) {
+        match c {
+            ' ' | '\t' => offset += c.len_utf8(),
+            ';' => return offset + 1,
+            _ => break,
+        }
+    }
+    end
 }
 
 // We allow markdown code blocks to end in a trailing newline in order to render the output
@@ -1007,6 +1098,266 @@ mod tests {
                 print("hello there")
                 "#
             },]
+        );
+    }
+
+    fn r_language() -> Arc<Language> {
+        Arc::new(Language::new(
+            LanguageConfig {
+                name: "R".into(),
+                line_comments: vec!["# ".into()],
+                ..Default::default()
+            },
+            Some(tree_sitter_r::LANGUAGE.into()),
+        ))
+    }
+
+    fn python_language() -> Arc<Language> {
+        Arc::new(Language::new(
+            LanguageConfig {
+                name: "Python".into(),
+                line_comments: vec!["# ".into()],
+                ..Default::default()
+            },
+            Some(tree_sitter_python::LANGUAGE.into()),
+        ))
+    }
+
+    fn run_r(source: &str, selection: Range<Point>, cx: &mut App) -> (Vec<String>, Option<Point>) {
+        run_in(r_language(), source, selection, cx)
+    }
+
+    fn run_in(
+        language: Arc<Language>,
+        source: &str,
+        selection: Range<Point>,
+        cx: &mut App,
+    ) -> (Vec<String>, Option<Point>) {
+        if !cx.has_global::<settings::SettingsStore>() {
+            settings::init(cx);
+        }
+        let buffer = cx.new(|cx| Buffer::local(source, cx).with_language(language, cx));
+        let snapshot = buffer.read(cx).snapshot();
+        let (ranges, next) = runnable_ranges(&snapshot, selection, cx);
+        let texts = ranges
+            .into_iter()
+            .map(|range| snapshot.text_for_range(range).collect::<String>())
+            .collect();
+        (texts, next)
+    }
+
+    #[gpui::test]
+    fn test_r_top_level_statements(cx: &mut App) {
+        let script = indoc! { r#"
+            library(stats)
+
+            # Helper that squares its input
+            square <- function(x) {
+              y <- x * x
+              y
+            }
+            # a comment between statements
+
+            result <- square(4)  # trailing comment
+            a <- 1; b <- 2
+        "# };
+        let square = "square <- function(x) {\n  y <- x * x\n  y\n}";
+        let cursor = |row, column| Point::new(row, column)..Point::new(row, column);
+
+        let cases: &[(&str, Range<Point>, &[&str], Option<Point>)] = &[
+            (
+                "first statement",
+                cursor(0, 0),
+                &["library(stats)"],
+                Some(Point::new(3, 0)),
+            ),
+            (
+                "blank line runs the next statement",
+                cursor(1, 0),
+                &[square],
+                Some(Point::new(9, 0)),
+            ),
+            (
+                "comment line runs the next statement",
+                cursor(2, 3),
+                &[square],
+                Some(Point::new(9, 0)),
+            ),
+            (
+                "inside a function body",
+                cursor(4, 4),
+                &[square],
+                Some(Point::new(9, 0)),
+            ),
+            (
+                "after a trailing comment",
+                cursor(9, 38),
+                &["result <- square(4)"],
+                Some(Point::new(10, 0)),
+            ),
+            (
+                "first of two statements on a row",
+                cursor(10, 0),
+                &["a <- 1;"],
+                Some(Point::new(10, 8)),
+            ),
+            (
+                "second of two statements on a row",
+                cursor(10, 8),
+                &["b <- 2"],
+                None,
+            ),
+            ("past the last statement", cursor(11, 0), &[], None),
+            (
+                "selection is sent verbatim",
+                Point::new(4, 2)..Point::new(4, 12),
+                &["y <- x * x"],
+                None,
+            ),
+            (
+                "line-wise selection stops at the last selected line",
+                Point::new(4, 0)..Point::new(6, 0),
+                &["  y <- x * x\n  y"],
+                None,
+            ),
+        ];
+        for (name, selection, expected_code, expected_next) in cases {
+            let (code, next) = run_r(script, selection.clone(), cx);
+            assert_eq!(
+                (code.iter().map(String::as_str).collect::<Vec<_>>(), next),
+                (expected_code.to_vec(), *expected_next),
+                "{name}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn test_python_top_level_statements(cx: &mut App) {
+        let script = indoc! { r#"
+            import os
+
+            @cache
+            def square(x):
+                return x * x
+
+            # a comment between statements
+            if __name__ == "__main__":
+                print(square(4))
+        "# };
+        let decorated = "@cache\ndef square(x):\n    return x * x";
+        let main_block = "if __name__ == \"__main__\":\n    print(square(4))";
+        let cursor = |row, column| Point::new(row, column)..Point::new(row, column);
+        let python = python_language;
+
+        assert_eq!(
+            run_in(python(), script, cursor(0, 0), cx),
+            (vec!["import os".to_string()], Some(Point::new(2, 0)))
+        );
+        assert_eq!(
+            run_in(python(), script, cursor(4, 8), cx),
+            (vec![decorated.to_string()], Some(Point::new(7, 0)))
+        );
+        assert_eq!(
+            run_in(python(), script, cursor(6, 0), cx),
+            (vec![main_block.to_string()], None)
+        );
+    }
+
+    #[gpui::test]
+    fn test_trailing_semicolon_is_sent(cx: &mut App) {
+        // IPython and IJulia do not display the result of code that ends in `;`.
+        let script = "df = load() ;\nx = 1;  # comment\ny = 2\n";
+        let cursor = |row, column| Point::new(row, column)..Point::new(row, column);
+        assert_eq!(
+            run_in(python_language(), script, cursor(0, 0), cx),
+            (vec!["df = load() ;".to_string()], Some(Point::new(1, 0)))
+        );
+        assert_eq!(
+            run_in(python_language(), script, cursor(1, 17), cx),
+            (vec!["x = 1;".to_string()], Some(Point::new(2, 0)))
+        );
+        assert_eq!(
+            run_r("x <- 1;\n", cursor(0, 7), cx),
+            (vec!["x <- 1;".to_string()], None)
+        );
+        assert_eq!(
+            run_r("a <- 1;b <- 2\n", cursor(0, 7), cx),
+            (vec!["b <- 2".to_string()], None)
+        );
+    }
+
+    #[gpui::test]
+    fn test_unlisted_language_runs_lines(cx: &mut App) {
+        // Same grammar, but a name that `repl.run_by_statement` does not list.
+        let unlisted = Arc::new(Language::new(
+            LanguageConfig {
+                name: "Unlisted".into(),
+                line_comments: vec!["# ".into()],
+                ..Default::default()
+            },
+            Some(tree_sitter_python::LANGUAGE.into()),
+        ));
+        let script = "x = 1\ny = 2\n\nz = 3\n";
+        assert_eq!(
+            run_in(unlisted, script, Point::new(0, 0)..Point::new(0, 0), cx),
+            (vec!["x = 1".to_string()], None)
+        );
+    }
+
+    #[gpui::test]
+    fn test_r_syntax_errors(cx: &mut App) {
+        // The parser keeps this error local, so the next line is its own statement.
+        let unclosed_paren = "x <- c(1, 2\ny <- 3\nz <- 4\n";
+        assert_eq!(
+            run_r(unclosed_paren, Point::new(1, 0)..Point::new(1, 0), cx),
+            (vec!["y <- 3".to_string()], Some(Point::new(2, 0)))
+        );
+
+        // An unclosed brace swallows the rest of the buffer, so only the
+        // cursor's line runs.
+        let unclosed_brace = "f <- function(x) {\n  x + 1\n\ny <- 3\nz <- 4\n";
+        assert_eq!(
+            run_r(unclosed_brace, Point::new(3, 0)..Point::new(3, 0), cx),
+            (vec!["y <- 3".to_string()], None)
+        );
+    }
+
+    #[gpui::test]
+    fn test_r_statements_at_buffer_edges(cx: &mut App) {
+        let leading_blank_lines = "\n\nf <- function(x) {\n  x\n}\n";
+        assert_eq!(
+            run_r(leading_blank_lines, Point::new(0, 0)..Point::new(0, 0), cx),
+            (vec!["f <- function(x) {\n  x\n}".to_string()], None)
+        );
+
+        let no_trailing_newline = "f <- function() {\n  1\n}";
+        assert_eq!(
+            run_r(no_trailing_newline, Point::new(2, 1)..Point::new(2, 1), cx),
+            (vec![no_trailing_newline.to_string()], None)
+        );
+    }
+
+    #[gpui::test]
+    fn test_r_with_jupytext_cells(cx: &mut App) {
+        let script = indoc! { r#"
+            # %%
+            x <- 1
+            y <- 2
+
+            # %%
+            z <- 3
+        "# };
+
+        assert_eq!(
+            run_r(script, Point::new(1, 0)..Point::new(1, 0), cx),
+            (
+                vec!["# %%\nx <- 1\ny <- 2".to_string()],
+                Some(Point::new(4, 0))
+            )
+        );
+        assert_eq!(
+            run_r(script, Point::new(2, 0)..Point::new(2, 6), cx),
+            (vec!["y <- 2".to_string()], None)
         );
     }
 
