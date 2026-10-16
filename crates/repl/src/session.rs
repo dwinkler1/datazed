@@ -221,7 +221,23 @@ impl EditorBlock {
                         .mr(editor_margins.right)
                         .pr_2()
                         .when_some(output_max_height, |div, max_h| {
-                            div.max_h(max_h).overflow_y_scroll()
+                            // gpui's own scroll listener lets the event bubble, so without
+                            // this the editor scrolls along with the output area. It runs
+                            // before this one, so the offset already includes the delta.
+                            let scroll_handle = execution_view.read(cx.app).scroll_handle.clone();
+                            div.max_h(max_h)
+                                .overflow_y_scroll()
+                                .track_scroll(&scroll_handle)
+                                .on_scroll_wheel(move |event, window, cx| {
+                                    let max = scroll_handle.max_offset().y;
+                                    let delta = event.delta.pixel_delta(window.line_height()).y;
+                                    let before = scroll_handle.offset().y - delta;
+                                    let at_end = (delta > Pixels::ZERO && before >= Pixels::ZERO)
+                                        || (delta < Pixels::ZERO && before <= -max);
+                                    if max > Pixels::ZERO && !at_end {
+                                        cx.stop_propagation();
+                                    }
+                                })
                         })
                         .child(execution_view),
                 )
