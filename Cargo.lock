@@ -14567,10 +14567,16 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 name = "r_tools"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
  "editor",
  "gpui",
+ "jupyter-protocol",
  "repl",
+ "serde_json",
  "terminal_view",
+ "ui",
+ "util",
  "workspace",
 ]
 

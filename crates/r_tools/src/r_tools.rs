@@ -1,21 +1,130 @@
+mod plot_view;
+
+use std::sync::Arc;
+
 use editor::{Bias, Editor, SelectionEffects, scroll::Autoscroll};
-use gpui::{App, Context, Window, actions};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Window, actions};
+use jupyter_protocol::JupyterMessage;
+use repl::{Kernel, KernelMessage, ReplStore, Session, SessionEvent};
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use workspace::{Toast, Workspace, dock::Panel as _, notifications::NotificationId};
+
+pub use plot_view::PlotView;
 
 actions!(
     r_tools,
     [
+        /// Opens the R plot viewer in a split pane.
+        OpenPlots,
         /// Sends the current top-level expression or selection to the active terminal.
         SendToTerminal,
     ]
 );
 
 pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+    cx.observe_new(|workspace: &mut Workspace, window, cx| {
+        let Some(window) = window else {
+            return;
+        };
+        let workspace_entity = cx.entity();
+        let tracker = cx.new(|cx| SessionTracker::new(&workspace_entity, cx));
+
+        plot_view::open_on_first_plot(&tracker, window, cx);
+
+        workspace.register_action(move |workspace, _: &OpenPlots, window, cx| {
+            plot_view::open_plot_view(workspace, &tracker, window, cx);
+        });
         workspace.register_action(send_to_terminal);
     })
     .detach();
+}
+
+pub struct SessionTracker {
+    session: Option<Entity<Session>>,
+    _workspace_subscription: Subscription,
+    _watch_editor_for_new_session: Option<Subscription>,
+    _session_subscriptions: Vec<Subscription>,
+}
+
+pub enum TrackerEvent {
+    SessionChanged,
+    SessionUpdated,
+    KernelMessage(Arc<JupyterMessage>),
+}
+
+impl EventEmitter<TrackerEvent> for SessionTracker {}
+
+impl SessionTracker {
+    fn new(workspace: &Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+        let workspace_subscription = cx.subscribe(workspace, |this, workspace, event, cx| {
+            if let workspace::Event::ActiveItemChanged = event {
+                this.follow_active_editor(&workspace, cx);
+            }
+        });
+        Self {
+            session: None,
+            _workspace_subscription: workspace_subscription,
+            _watch_editor_for_new_session: None,
+            _session_subscriptions: Vec::new(),
+        }
+    }
+
+    pub fn session(&self) -> Option<&Entity<Session>> {
+        self.session.as_ref()
+    }
+
+    pub fn running_session(&self, cx: &App) -> Option<&Entity<Session>> {
+        self.session
+            .as_ref()
+            .filter(|session| matches!(session.read(cx).kernel, Kernel::RunningKernel(_)))
+    }
+
+    fn follow_active_editor(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
+        let Some(editor) = workspace.read(cx).active_item_as::<Editor>(cx) else {
+            return;
+        };
+        self._watch_editor_for_new_session = Some(cx.observe(&editor, |this, editor, cx| {
+            this.attach_session_for(&editor, cx);
+        }));
+        self.attach_session_for(&editor, cx);
+    }
+
+    fn attach_session_for(&mut self, editor: &Entity<Editor>, cx: &mut Context<Self>) {
+        let Some(session) = ReplStore::global(cx)
+            .read(cx)
+            .get_session(editor.entity_id())
+            .cloned()
+        else {
+            return;
+        };
+        if self.session.as_ref() == Some(&session) {
+            return;
+        }
+
+        self._session_subscriptions = vec![
+            cx.subscribe(&session, |_this, _session, event: &KernelMessage, cx| {
+                cx.emit(TrackerEvent::KernelMessage(event.0.clone()));
+            }),
+            cx.subscribe(&session, |this, session, event: &SessionEvent, cx| {
+                let SessionEvent::Shutdown(_) = event;
+                session.update(cx, |session, _| session.followed = false);
+                this.session = None;
+                this._session_subscriptions.clear();
+                cx.emit(TrackerEvent::SessionChanged);
+            }),
+            cx.observe(&session, |_this, _session, cx| {
+                cx.emit(TrackerEvent::SessionUpdated);
+            }),
+        ];
+        // A followed session emits KernelMessage events and leaves its plots to
+        // the plots pane; a session no longer followed shows them inline again.
+        if let Some(previous) = self.session.take() {
+            previous.update(cx, |previous, _| previous.followed = false);
+        }
+        session.update(cx, |session, _| session.followed = true);
+        self.session = Some(session);
+        cx.emit(TrackerEvent::SessionChanged);
+    }
 }
 
 /// Whether a terminal's foreground process is a REPL that takes pasted code:

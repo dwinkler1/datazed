@@ -2847,6 +2847,9 @@
     // Maximum number of columns of output to display before scaling images.
     // Set to 0 to disable output width limits.
     "output_max_width_columns": 0,
+    // Whether PNG plots of the session the plots pane follows are also shown
+    // inline under the code. When false, they appear only in the plots pane.
+    "inline_plots": false,
   },
   // Vim settings
   "vim": {
