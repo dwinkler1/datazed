@@ -16105,6 +16105,7 @@ version = "0.1.0"
 dependencies = [
  "editor",
  "gpui",
+ "indoc",
  "language",
  "terminal_view",
  "workspace",

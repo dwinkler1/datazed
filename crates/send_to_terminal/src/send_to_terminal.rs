@@ -1,3 +1,5 @@
+mod statement;
+
 use std::ops::Range;
 
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
@@ -12,6 +14,10 @@ actions!(
         /// Sends the selection, or the line at the cursor, to the active
         /// terminal and moves the cursor to the line after the code it sent.
         SendToTerminal,
+        /// Selects the top-level statement at the cursor, found from the
+        /// buffer's syntax tree. Leaves a non-empty selection as it is, and
+        /// the cursor as it is when no statement is found there.
+        SelectStatement,
     ]
 );
 
@@ -22,9 +28,19 @@ pub fn init(cx: &mut App) {
         }
         let handle = cx.entity().downgrade();
         editor
-            .register_action(move |_: &SendToTerminal, window, cx| {
+            .register_action({
+                let handle = handle.clone();
+                move |_: &SendToTerminal, window, cx| {
+                    if let Some(editor) = handle.upgrade() {
+                        send_to_terminal(&editor, window, cx);
+                    }
+                }
+            })
+            .detach();
+        editor
+            .register_action(move |_: &SelectStatement, window, cx| {
                 if let Some(editor) = handle.upgrade() {
-                    send_to_terminal(&editor, window, cx);
+                    select_statement(&editor, window, cx);
                 }
             })
             .detach();
@@ -94,6 +110,36 @@ fn send_to_terminal(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) 
             window,
             cx,
             |selections| selections.select_ranges([next_anchor..next_anchor]),
+        );
+    });
+}
+
+fn select_statement(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    editor.update(cx, |editor, cx| {
+        let selection = editor
+            .selections
+            .newest_adjusted(&editor.display_snapshot(cx))
+            .range();
+        if selection.start != selection.end {
+            return;
+        }
+        let Some(buffer) = editor.buffer().read(cx).as_singleton() else {
+            return;
+        };
+        let snapshot = buffer.read(cx).snapshot();
+        let Some(statement) = statement::top_level_statement_at(&snapshot, selection.start) else {
+            return;
+        };
+        let range = {
+            let multibuffer_snapshot = editor.buffer().read(cx).read(cx);
+            multibuffer_snapshot.anchor_before(statement.start)
+                ..multibuffer_snapshot.anchor_after(statement.end)
+        };
+        editor.change_selections(
+            SelectionEffects::scroll(Autoscroll::fit()),
+            window,
+            cx,
+            |selections| selections.select_anchor_ranges([range]),
         );
     });
 }
