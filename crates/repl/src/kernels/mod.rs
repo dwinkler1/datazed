@@ -128,6 +128,15 @@ pub fn start_kernel_tasks<S: KernelSession + 'static>(
                             })
                             .ok();
                     }
+                    // Ark sends comm_close without the `data` field that
+                    // jupyter-protocol requires, for example after `View(df)`
+                    // and `rm(df)`.
+                    Err(runtimelib::RuntimeError::ParseError {
+                        ref msg_type,
+                        ref source,
+                    }) if msg_type == "comm_close" => {
+                        log::warn!("kernel: ignoring a comm_close on {channel}: {source}");
+                    }
                     Err(
                         ref err @ (runtimelib::RuntimeError::ParseError { .. }
                         | runtimelib::RuntimeError::SerdeError(_)),
