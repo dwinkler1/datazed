@@ -16100,6 +16100,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "send_to_terminal"
+version = "0.1.0"
+dependencies = [
+ "editor",
+ "gpui",
+ "language",
+ "terminal_view",
+ "workspace",
+]
+
+[[package]]
 name = "send_wrapper"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22495,6 +22506,7 @@ dependencies = [
  "sandbox",
  "search",
  "semver",
+ "send_to_terminal",
  "serde",
  "serde_json",
  "session",

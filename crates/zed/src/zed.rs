@@ -5964,6 +5964,7 @@ mod tests {
                 "remote_debug",
                 "repl",
                 "search",
+                "send_to_terminal",
                 "settings_editor",
                 "settings_profile_selector",
                 "skill_creator",

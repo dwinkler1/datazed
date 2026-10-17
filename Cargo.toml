@@ -187,6 +187,7 @@ members = [
     "crates/scheduler",
     "crates/schema_generator",
     "crates/search",
+    "crates/send_to_terminal",
     "crates/session",
     "crates/settings",
     "crates/settings_content",
@@ -458,6 +459,7 @@ rpc = { path = "crates/rpc" }
 sandbox = { path = "crates/sandbox" }
 scheduler = { path = "crates/scheduler" }
 search = { path = "crates/search" }
+send_to_terminal = { path = "crates/send_to_terminal" }
 session = { path = "crates/session" }
 settings = { path = "crates/settings" }
 settings_content = { path = "crates/settings_content" }
