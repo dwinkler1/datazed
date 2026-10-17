@@ -1,0 +1,7 @@
+[deps]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DataZedVariables = "46f4fe23-5a00-4145-943b-f0598cb812a4"
+Test = "8dfed614-e22c-5e08-85e1-65c5234e0b40"
+
+[sources]
+DataZedVariables = {path = ".."}
