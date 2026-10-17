@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# Move the DataZed commits onto the newest stable Zed release, check them,
+# rebuild /Applications/DataZed.app, then verify its signature and launch
+# and quit it once.
+#
+# Usage: script/update-datazed [--no-build | --build-only] [--push] [target]
+#   target        tag or ref to rebase onto; default: newest vX.Y.Z tag (no -pre)
+#   --no-build    stop after the rebase and checks; do not bundle or install
+#   --build-only  skip the fetch and rebase; check, build and verify the
+#                 current branch (after committing a local fix)
+#   --push        after the build and launch check pass, force-push the branch
+#                 and the base tag to PUSH_REMOTE (only if the remote branch
+#                 is still where this checkout last saw it)
+#
+# The upstream commit the DataZed commits sit on is recorded as the tag
+# `datazed/base` in the checkout. Rerun the script after resolving a
+# conflict or quitting DataZed; finished steps are skipped.
+#
+# Environment: ZED_DIR (default: the checkout holding this script), BRANCH
+# (default data-tools), PUSH_REMOTE (default fork), UPSTREAM_REMOTE (default:
+# the remote whose URL names zed-industries/zed, else Zed's GitHub URL).
+
+set -euo pipefail
+
+# The rebase rewrites this file; bash reads a script as it runs, so the whole
+# body is one block, parsed before any of it runs.
+{
+
+ZED_DIR=${ZED_DIR:-"$(cd "$(dirname "$0")/.." && pwd)"}
+BRANCH=${BRANCH:-data-tools}
+PUSH_REMOTE=${PUSH_REMOTE:-fork}
+BASE_TAG=datazed/base
+XCODE_DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+APP=/Applications/DataZed.app
+
+build=true
+update=true
+push=false
+target=""
+for arg in "$@"; do
+    case "$arg" in
+        --no-build) build=false ;;
+        --build-only) update=false ;;
+        --push) push=true ;;
+        -h | --help) sed -n '2,22p' "$0"; exit 0 ;;
+        *) target=$arg ;;
+    esac
+done
+[ "$build" = false ] && [ "$update" = false ] && { echo "error: --no-build and --build-only exclude each other" >&2; exit 1; }
+[ "$push" = true ] && [ "$build" = false ] && { echo "error: --push needs a build; drop --no-build" >&2; exit 1; }
+
+step() { printf '\n== %s\n' "$*"; }
+rebasing() { [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; }
+fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+cd "$ZED_DIR"
+
+step "Checking $ZED_DIR"
+rebasing &&
+    fail "a rebase is in progress; resolve it (git status) and run 'git rebase --continue', then rerun"
+[ "$(git branch --show-current)" = "$BRANCH" ] || fail "check out $BRANCH first"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || fail "uncommitted changes in $ZED_DIR"
+git rev-parse -q --verify "refs/tags/$BASE_TAG" >/dev/null ||
+    fail "tag $BASE_TAG is missing; create it at the upstream commit $BRANCH is based on"
+[ ! -L target ] || [ -d target/ ] ||
+    fail "build folder target links to a missing folder (is the external drive mounted?)"
+if [ "$push" = true ]; then
+    git remote get-url "$PUSH_REMOTE" >/dev/null 2>&1 || fail "remote $PUSH_REMOTE does not exist"
+    git rev-parse -q --verify "refs/remotes/$PUSH_REMOTE/$BRANCH" >/dev/null ||
+        git fetch --quiet "$PUSH_REMOTE" "$BRANCH" ||
+        fail "cannot read $BRANCH from $PUSH_REMOTE"
+fi
+git config rerere.enabled true
+git config rerere.autoUpdate true
+
+if [ "$update" = false ]; then
+    target=$(git describe --tags --exact-match --match 'v[0-9]*' "$BASE_TAG" 2>/dev/null ||
+        git rev-parse --short "$BASE_TAG^{commit}")
+    echo "--build-only: keeping $BRANCH on $target"
+else
+
+if [ -z "${UPSTREAM_REMOTE:-}" ]; then
+    UPSTREAM_REMOTE=$(git remote -v | awk '$2 ~ /zed-industries\/zed(\.git)?$/ { print $1; exit }')
+    UPSTREAM_REMOTE=${UPSTREAM_REMOTE:-https://github.com/zed-industries/zed.git}
+fi
+step "Fetching upstream ($UPSTREAM_REMOTE)"
+git fetch --quiet --tags --force "$UPSTREAM_REMOTE"
+if [ -z "$target" ]; then
+    target=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+fi
+target_commit=$(git rev-parse --verify "$target^{commit}")
+base_commit=$(git rev-parse "$BASE_TAG^{commit}")
+echo "target $target ($(git rev-parse --short "$target_commit")), current base $(git rev-parse --short "$base_commit")"
+
+if [ "$target_commit" = "$base_commit" ]; then
+    echo "already based on $target"
+elif git merge-base --is-ancestor "$target_commit" "$base_commit"; then
+    echo "$target is older than the current base; nothing to update"
+    exit 0
+elif git merge-base --is-ancestor "$target_commit" "$BRANCH"; then
+    # A rebase that stopped on conflicts and was finished by hand.
+    echo "$BRANCH is already on $target; moving $BASE_TAG there"
+    git tag -f "$BASE_TAG" "$target_commit" >/dev/null
+    base_commit=$target_commit
+fi
+
+if [ "$target_commit" != "$base_commit" ]; then
+    backup="datazed/backup-$(date +%Y%m%d-%H%M%S)"
+    git tag "$backup" HEAD
+    step "Rebasing $BRANCH onto $target (previous state saved as tag $backup)"
+    if ! git rebase --onto "$target_commit" "$base_commit" "$BRANCH"; then
+        # Cargo.lock conflicts are mechanical: take upstream's file and let
+        # cargo add the DataZed crates back. Anything else needs a person.
+        last_stop=""
+        while rebasing; do
+            conflicted=$(git diff --name-only --diff-filter=U)
+            if [ "$conflicted" = "Cargo.lock" ]; then
+                git checkout --ours Cargo.lock
+                cargo metadata --format-version 1 >/dev/null
+                git add Cargo.lock
+            elif [ -n "$conflicted" ]; then
+                printf 'Conflicts to resolve by hand:\n%s\n' "$conflicted"
+                echo "Resolve them, run 'git add <files>' and 'git rebase --continue',"
+                echo "repeat until the rebase finishes (this script is missing until then),"
+                echo "then rerun this script. To abandon: git rebase --abort"
+                exit 1
+            fi
+            this_stop=$(git rev-parse --quiet --verify REBASE_HEAD || true)
+            [ "$this_stop" != "$last_stop" ] ||
+                fail "the rebase does not advance past $this_stop; finish it by hand (git status), then rerun"
+            last_stop=$this_stop
+            # A commit whose changes are all upstream already has nothing to apply.
+            if git diff --cached --quiet; then
+                git rebase --skip || true
+            else
+                GIT_EDITOR=true git rebase --continue || true
+            fi
+        done
+    fi
+    git tag -f "$BASE_TAG" "$target_commit" >/dev/null
+fi
+
+fi # update
+
+step "Checking repl and r_tools"
+cargo clippy -p repl -p r_tools -p terminal --tests --no-deps -- --deny warnings
+cargo test -p repl -p r_tools
+
+if [ -n "$(git status --porcelain --untracked-files=no -- Cargo.lock)" ]; then
+    git add Cargo.lock
+    git commit --quiet -m "Cargo.lock: re-resolve after rebasing onto $target"
+fi
+
+if [ "$build" = false ]; then
+    step "Done (--no-build): $BRANCH is on $target and passes the checks"
+    exit 0
+fi
+
+pgrep -f "^$APP/Contents/MacOS/zed" >/dev/null &&
+    fail "DataZed is running; quit it and rerun (the rebase and checks are done)"
+
+step "Building and installing $APP"
+log="target/update-$(date +%Y%m%d-%H%M%S).log"
+started=$(date +%s)
+# bundle-mac exits non-zero at its DMG step after installing; judge success
+# by whether it reports the install and the installed binary is new.
+DEVELOPER_DIR=$XCODE_DEVELOPER_DIR script/bundle-mac -i 2>&1 | tee "$log" || true
+grep -q "Installed application bundle: $APP" "$log" &&
+    [ "$(stat -f %m "$APP/Contents/MacOS/zed")" -ge "$started" ] ||
+    fail "bundle build did not install $APP; see $ZED_DIR/$log"
+
+step "Verifying $APP"
+codesign --verify --deep "$APP" || fail "codesign --verify failed for $APP"
+# DataZed shares Zed's log folder, so only lines written after launch count;
+# a panic from a regular Zed running at the same time would also show here.
+zed_log=$HOME/Library/Logs/Zed/Zed.log
+log_offset=$(stat -f %z "$zed_log" 2>/dev/null || echo 0)
+open -a "$APP"
+sleep 8
+pgrep -f "^$APP/Contents/MacOS/zed" >/dev/null || fail "DataZed exited within 8 s of launch; see $zed_log"
+osascript -e "tell application id \"$(defaults read "$APP/Contents/Info" CFBundleIdentifier)\" to quit"
+for _ in $(seq 15); do
+    pgrep -f "^$APP/Contents/MacOS/zed" >/dev/null || break
+    sleep 1
+done
+pgrep -f "^$APP/Contents/MacOS/zed" >/dev/null && fail "DataZed did not quit within 15 s"
+if [ "$(stat -f %z "$zed_log" 2>/dev/null || echo 0)" -ge "$log_offset" ]; then
+    new_log=$(tail -c +$((log_offset + 1)) "$zed_log" 2>/dev/null || true)
+else
+    new_log=$(cat "$zed_log") # rotated to Zed.log.old during the run
+fi
+if grep -i panic <<<"$new_log"; then
+    fail "panic in $zed_log during the launch check"
+fi
+echo "signature ok; launched, ran 8 s and quit; no panic in $zed_log"
+
+step "Installed $APP from $BRANCH on $target"
+
+if [ "$push" = true ]; then
+    step "Pushing $BRANCH and $BASE_TAG to $PUSH_REMOTE"
+    # The lease refuses the push if someone else moved the remote branch since
+    # this checkout last fetched or pushed it.
+    git push --force-with-lease="$BRANCH:refs/remotes/$PUSH_REMOTE/$BRANCH" "$PUSH_REMOTE" "$BRANCH" ||
+        fail "push refused; fetch $PUSH_REMOTE and compare before pushing again"
+    git push --force "$PUSH_REMOTE" "refs/tags/$BASE_TAG"
+    echo "$PUSH_REMOTE/$BRANCH is now $(git rev-parse --short "$BRANCH")"
+fi
+
+exit
+}

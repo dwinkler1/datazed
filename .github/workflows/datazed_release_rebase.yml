@@ -1,0 +1,181 @@
+# Rebases the DataZed commits (branch data-tools) onto each new stable Zed
+# release, runs the repl and r_tools checks, and pushes the result to
+# datazed-update/<tag> for review. It never changes data-tools: to adopt a
+# release, rebase data-tools onto it on a Mac, build and run DataZed there, then
+# push data-tools and the datazed/base tag.
+#
+# Needs the repository secret DATAZED_PUSH_TOKEN: a fine-grained token for
+# this repository with Contents and Workflows read/write. The default token
+# cannot push the upstream commits that change files in .github/workflows.
+name: DataZed release rebase
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Zed tag to rebase onto (default: newest vX.Y.Z release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: datazed-release-rebase
+
+jobs:
+  rebase:
+    if: github.repository == 'dwinkler1/datazed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      BASE_TAG: datazed/base
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Check out data-tools
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: data-tools
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pick the target release
+        id: target
+        env:
+          TARGET_INPUT: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet --force origin "refs/tags/$BASE_TAG:refs/tags/$BASE_TAG"
+          git fetch --quiet --force --no-tags https://github.com/zed-industries/zed.git 'refs/tags/v*:refs/tags/v*'
+          target=${TARGET_INPUT:-$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)}
+          [[ "$target" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-pre)?$ ]] || { echo "not a Zed release tag: $target"; exit 1; }
+          git rev-parse --verify --quiet "refs/tags/$target^{commit}" >/dev/null || { echo "unknown tag $target"; exit 1; }
+          zed_version() { git show "$1:crates/zed/Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+          base_version=$(zed_version "$BASE_TAG")
+          target_version=$(zed_version "$target")
+          review_branch="datazed-update/$target"
+          failed_branch="$review_branch-failed"
+          run=true
+          if [ "$(git rev-parse "$target^{commit}")" = "$(git rev-parse "$BASE_TAG^{commit}")" ]; then
+            reason="data-tools is already based on $target."
+            run=false
+          elif git merge-base --is-ancestor "$target" "$BASE_TAG"; then
+            reason="$target is already part of the base."
+            run=false
+          elif [ -z "$TARGET_INPUT" ] && ! git merge-base --is-ancestor "$BASE_TAG" "$target" &&
+            [ "$(printf '%s\n%s\n' "$target_version" "$base_version" | sort -V | tail -1)" = "$base_version" ]; then
+            # A base on main carries the version of the release cut from it
+            # later, so a release that contains the base counts as newer.
+            reason="The newest release, $target ($target_version), is not newer than the base ($base_version)."
+            run=false
+          elif git ls-remote --exit-code --heads origin "$review_branch" >/dev/null; then
+            reason="$review_branch already exists."
+            run=false
+          elif [ -z "$TARGET_INPUT" ] && git ls-remote --exit-code --heads origin "$failed_branch" >/dev/null; then
+            reason="An earlier run onto $target failed; delete the branch $failed_branch, or start this workflow by hand with $target, to retry."
+            run=false
+          fi
+          if [ "$run" = false ]; then echo "$reason Nothing to do." >> "$GITHUB_STEP_SUMMARY"; fi
+          {
+            echo "run=$run"
+            echo "target=$target"
+            echo "review_branch=$review_branch"
+            echo "failed_branch=$failed_branch"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Rebase data-tools onto the release
+        if: steps.target.outputs.run == 'true'
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+          REVIEW_BRANCH: ${{ steps.target.outputs.review_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --quiet -c "$REVIEW_BRANCH"
+          rebasing() { [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; }
+          stop() {
+            {
+              echo "Rebasing onto $TARGET stopped: $1"
+              echo "Resolve it in a local rebase of data-tools onto $TARGET."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          if ! git rebase --onto "$TARGET" "$BASE_TAG"; then
+            # Cargo.lock conflicts are mechanical: take upstream's file and let
+            # cargo add the DataZed crates back. Anything else needs a person.
+            last_stop=""
+            while rebasing; do
+              conflicted=$(git diff --name-only --diff-filter=U)
+              if [ "$conflicted" = "Cargo.lock" ]; then
+                git checkout --ours Cargo.lock
+                cargo metadata --format-version 1 >/dev/null
+                git add Cargo.lock
+              elif [ -n "$conflicted" ]; then
+                stop "conflicts in $(echo $conflicted)."
+              fi
+              this_stop=$(git rev-parse --quiet --verify REBASE_HEAD || true)
+              [ "$this_stop" != "$last_stop" ] || stop "it does not advance past $this_stop."
+              last_stop=$this_stop
+              # A commit whose changes are all upstream already has nothing to apply.
+              if git diff --cached --quiet; then
+                git rebase --skip || true
+              else
+                GIT_EDITOR=true git rebase --continue || true
+              fi
+            done
+          fi
+
+      # After the rebase, so a conflict stops the run before the slow setup.
+      - name: Free disk space
+        if: steps.target.outputs.run == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install Linux build dependencies
+        if: steps.target.outputs.run == 'true'
+        run: ./script/linux
+
+      - name: Check repl, r_tools and zed
+        if: steps.target.outputs.run == 'true'
+        run: |
+          cargo clippy -p repl -p r_tools -p terminal --tests --no-deps -- --deny warnings
+          cargo test -p repl -p r_tools
+          cargo check -p zed
+
+      - name: Push the review branch
+        if: steps.target.outputs.run == 'true'
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+          REVIEW_BRANCH: ${{ steps.target.outputs.review_branch }}
+          PUSH_TOKEN: ${{ secrets.DATAZED_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain --untracked-files=no -- Cargo.lock)" ]; then
+            git add Cargo.lock
+            git commit --quiet -m "Cargo.lock: re-resolve after rebasing onto $TARGET"
+          fi
+          # The token reaches only this step, not the build scripts and tests above.
+          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$REVIEW_BRANCH"
+          {
+            echo "Rebased data-tools onto $TARGET; clippy, the repl and r_tools tests and cargo check -p zed pass."
+            echo "Review branch: \`$REVIEW_BRANCH\`."
+            echo "To adopt it, rebase data-tools onto $TARGET on a Mac, build and run DataZed there, then push data-tools and the datazed/base tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark the failed run
+        if: failure() && steps.target.outputs.run == 'true'
+        env:
+          FAILED_BRANCH: ${{ steps.target.outputs.failed_branch }}
+          PUSH_TOKEN: ${{ secrets.DATAZED_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The daily run skips a release with this branch instead of failing again.
+          git push --force "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/remotes/origin/data-tools:refs/heads/$FAILED_BRANCH"
+          echo "Marked the failure with the branch \`$FAILED_BRANCH\`; delete it to retry daily." >> "$GITHUB_STEP_SUMMARY"
