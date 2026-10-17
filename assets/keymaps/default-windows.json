@@ -1701,4 +1701,13 @@
       "right": ["tabular_data::MoveFocusedCell", { "direction": "right" }],
     },
   },
+  {
+    "context": "Editor && mode == full && extension",
+    "bindings": {
+      "ctrl-enter": [
+        "action::Sequence",
+        ["send_to_terminal::SelectStatement", "send_to_terminal::SendToTerminal"],
+      ],
+    },
+  },
 ]
