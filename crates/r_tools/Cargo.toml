@@ -21,6 +21,7 @@ editor.workspace = true
 gpui.workspace = true
 jupyter-protocol.workspace = true
 log.workspace = true
+menu.workspace = true
 repl.workspace = true
 serde.workspace = true
 serde_json.workspace = true

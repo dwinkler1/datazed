@@ -9,21 +9,31 @@ use std::ops::Range;
 use collections::HashMap;
 use db::kvp::KeyValueStore;
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, PromptLevel,
-    Subscription, Task, WeakEntity, Window, px, uniform_list,
+    Action, App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    PromptLevel, ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    px, uniform_list,
 };
 use jupyter_protocol::{
     CommClose, CommId, CommMsg, CommOpen, ExecutionState, JupyterMessage, JupyterMessageContent,
 };
+use menu::{SelectNext, SelectPrevious};
 use repl::{Kernel, Session};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use settings::SettingsStore;
+use terminal_view::terminal_panel::TerminalPanel;
 use ui::{IconButton, IconName, ListItem, Tooltip, prelude::*};
 use util::ResultExt as _;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
+use workspace::{
+    Toast, Workspace,
+    dock::{DockPosition, Panel, PanelEvent},
+    notifications::NotificationId,
+};
 
-use crate::{SessionTracker, ToggleVariables, TrackerEvent};
+use crate::{
+    CollapseSelectedVariable, CopyVariableName, ExpandSelectedVariable, PrintVariableStructure,
+    SessionTracker, ToggleVariables, TrackerEvent, find_console, paste_and_run,
+};
 
 const VARIABLES_COMM_TARGET: &str = "positron.variables";
 const ACTIVATION_PRIORITY: u32 = 40;
@@ -214,6 +224,47 @@ fn parse_variables(value: Option<&Value>) -> Option<Vec<Variable>> {
     serde_json::from_value(value?.clone()).log_err()
 }
 
+/// Backquotes a name that R would not parse as a symbol, such as `my var`.
+fn r_symbol(name: &str) -> String {
+    const RESERVED: [&str; 19] = [
+        "if",
+        "else",
+        "repeat",
+        "while",
+        "function",
+        "for",
+        "in",
+        "next",
+        "break",
+        "TRUE",
+        "FALSE",
+        "NULL",
+        "Inf",
+        "NaN",
+        "NA",
+        "NA_integer_",
+        "NA_real_",
+        "NA_character_",
+        "NA_complex_",
+    ];
+    let mut chars = name.chars();
+    let starts_well = match (chars.next(), chars.next()) {
+        (Some('.'), second) => !second.is_some_and(|c| c.is_ascii_digit()),
+        (Some(first), _) => first.is_alphabetic(),
+        (None, _) => false,
+    };
+    let syntactic = starts_well
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+        && !RESERVED.contains(&name);
+    if syntactic {
+        name.to_string()
+    } else {
+        format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`"))
+    }
+}
+
 enum Comm {
     Unopened,
     Open {
@@ -236,24 +287,36 @@ const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub struct VariablesPanel {
     focus_handle: FocusHandle,
     tracker: Entity<SessionTracker>,
+    workspace: WeakEntity<Workspace>,
     position: DockPosition,
     comm: Comm,
     model: VariablesModel,
     rows: Vec<Row>,
+    /// The path of the selected row; it stays selected while rows above it
+    /// change, and selects nothing once it is gone.
+    selected: Option<Vec<String>>,
+    scroll_handle: UniformListScrollHandle,
     _open_timeout: Option<Task<()>>,
     _subscription: Subscription,
 }
 
 impl VariablesPanel {
-    pub(crate) fn new(tracker: Entity<SessionTracker>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        tracker: Entity<SessionTracker>,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscription = cx.subscribe(&tracker, Self::on_tracker_event);
         Self {
             focus_handle: cx.focus_handle(),
             tracker,
+            workspace,
             position: saved_dock_position(cx),
             comm: Comm::Unopened,
             model: VariablesModel::default(),
             rows: Vec::new(),
+            selected: None,
+            scroll_handle: UniformListScrollHandle::new(),
             _open_timeout: None,
             _subscription: subscription,
         }
@@ -499,10 +562,190 @@ impl VariablesPanel {
         .detach();
     }
 
+    /// The selected row and its index among the rows the model shows now,
+    /// which may differ from `self.rows` until the next render.
+    fn selected_row(&self) -> Option<(usize, Row)> {
+        let selected = self.selected.as_ref()?;
+        self.model
+            .rows()
+            .into_iter()
+            .enumerate()
+            .find(|(_, row)| &row.path == selected)
+    }
+
+    fn select(&mut self, path: Vec<String>, index: usize, cx: &mut Context<Self>) {
+        self.selected = Some(path);
+        self.scroll_handle
+            .scroll_to_item(index, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    fn move_selection(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let mut rows = self.model.rows();
+        let Some(last) = rows.len().checked_sub(1) else {
+            return;
+        };
+        let index = match (self.selected_row(), forward) {
+            (Some((index, _)), true) => (index + 1).min(last),
+            (Some((index, _)), false) => index.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => last,
+        };
+        self.select(rows.swap_remove(index).path, index, cx);
+    }
+
+    fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(true, cx);
+    }
+
+    fn select_previous(&mut self, _: &SelectPrevious, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selection(false, cx);
+    }
+
+    fn expand_selected(
+        &mut self,
+        _: &ExpandSelectedVariable,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((index, row)) = self.selected_row() else {
+            return;
+        };
+        if !row.variable.has_children {
+            return;
+        }
+        match self.model.expansions.get(&row.path) {
+            None => self.toggle_expanded(row.path, cx),
+            Some(Expansion::Loaded(children)) if !children.is_empty() => {
+                let mut first_child = row.path;
+                first_child.push(children[0].access_key.clone());
+                self.select(first_child, index + 1, cx);
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn collapse_selected(
+        &mut self,
+        _: &CollapseSelectedVariable,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, mut row)) = self.selected_row() else {
+            return;
+        };
+        if self.model.expansions.contains_key(&row.path) {
+            self.toggle_expanded(row.path, cx);
+            return;
+        }
+        if row.path.len() > 1 {
+            row.path.pop();
+            if let Some(index) = self.model.rows().iter().position(|r| r.path == row.path) {
+                self.select(row.path, index, cx);
+            }
+        }
+    }
+
+    fn copy_selected_name(&mut self, _: &CopyVariableName, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some((_, row)) = self.selected_row() {
+            cx.write_to_clipboard(ClipboardItem::new_string(row.variable.display_name));
+        }
+    }
+
+    fn print_selected_structure(
+        &mut self,
+        _: &PrintVariableStructure,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        struct CannotPrint;
+
+        let Some((_, row)) = self.selected_row() else {
+            return;
+        };
+        if let Err(message) = self.print_structure(&row, window, cx) {
+            self.workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        Toast::new(NotificationId::unique::<CannotPrint>(), message).autohide(),
+                        cx,
+                    )
+                })
+                .ok();
+        }
+    }
+
+    /// Pastes `str(name)` (R) or `dump(name; maxdepth=1)` (Julia) into the
+    /// console that OpenConsole opened on this session, so the output appears
+    /// there and the object is read by the same kernel. Only top-level objects
+    /// are printed: a nested row's access keys are not an expression.
+    fn print_structure(
+        &self,
+        row: &Row,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        if row.path.len() > 1 {
+            return Err("Only top-level objects can be printed in the console.");
+        }
+        let session = self
+            .tracker
+            .read(cx)
+            .running_session(cx)
+            .ok_or("Run some code to start a kernel session.")?
+            .read(cx);
+        let name = &row.variable.display_name;
+        let code = match session
+            .kernel_specification
+            .language()
+            .to_lowercase()
+            .as_str()
+        {
+            "r" => format!("str({})", r_symbol(name)),
+            "julia" => format!("dump({name}; maxdepth=1)"),
+            _ => return Err("Printing an object's structure works with R and Julia kernels."),
+        };
+        let Kernel::RunningKernel(kernel) = &session.kernel else {
+            return Err("Run some code to start a kernel session.");
+        };
+        let connection_file = kernel
+            .connection_file()
+            .ok_or("This kernel has no connection file for a console.")?
+            .to_path_buf();
+        let workspace = self.workspace.upgrade().ok_or("The workspace is closed.")?;
+        workspace.update(cx, |workspace, cx| {
+            let (pane, index, terminal_view) = find_console(workspace, &connection_file, cx)
+                .ok_or("Open the REPL console to print an object's structure there.")?;
+            paste_and_run(&terminal_view, &code, cx);
+            // Show the console without taking focus from the panel, so the
+            // keys keep moving through the variables.
+            pane.update(cx, |pane, cx| {
+                pane.activate_item(index, false, false, window, cx)
+            });
+            workspace.open_panel::<TerminalPanel>(window, cx);
+            Ok(())
+        })
+    }
+
+    /// A click selects the row, copies its name and prints its structure in
+    /// the console when one is open; the disclosure arrow expands it.
+    fn click_row(&mut self, path: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.model.rows().iter().position(|row| row.path == path) else {
+            return;
+        };
+        window.focus(&self.focus_handle, cx);
+        self.select(path, index, cx);
+        self.copy_selected_name(&CopyVariableName, window, cx);
+        if let Some((_, row)) = self.selected_row() {
+            self.print_structure(&row, window, cx).ok();
+        }
+    }
+
     fn render_row(&self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let row = &self.rows[index];
         let variable = &row.variable;
         let is_expanded = self.model.expansions.contains_key(&row.path);
+        let is_selected = self.selected.as_ref() == Some(&row.path);
         let toggle_path = row.path.clone();
         let click_path = row.path.clone();
 
@@ -512,15 +755,14 @@ impl VariablesPanel {
             .indent_level(row.depth + 1)
             .indent_step_size(window.rem_size() + px(4.))
             .always_show_disclosure_icon(true)
+            .toggle_state(is_selected)
             .toggle(variable.has_children.then_some(is_expanded))
             .on_toggle(cx.listener(move |this, _, _, cx| {
                 this.toggle_expanded(toggle_path.clone(), cx);
             }))
-            .when(variable.has_children, |item| {
-                item.on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_expanded(click_path.clone(), cx);
-                }))
-            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.click_row(click_path.clone(), window, cx);
+            }))
             .child(
                 h_flex()
                     .w_full()
@@ -632,12 +874,20 @@ impl Render for VariablesPanel {
                 }),
             )
             .size_full()
+            .track_scroll(&self.scroll_handle)
             .into_any_element()
         };
 
         v_flex()
             .id("r-variables-panel")
+            .key_context("VariablesPanel")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::expand_selected))
+            .on_action(cx.listener(Self::collapse_selected))
+            .on_action(cx.listener(Self::copy_selected_name))
+            .on_action(cx.listener(Self::print_selected_structure))
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(toolbar)
@@ -840,5 +1090,63 @@ mod tests {
             &data(json!({ "method": "refresh", "params": { "length": 0, "variables": [], "version": 2 } })),
         );
         assert_eq!(model.clear_error, None);
+    }
+
+    #[test]
+    fn test_r_symbol_backquotes_non_syntactic_names() {
+        assert_eq!(r_symbol("df"), "df");
+        assert_eq!(r_symbol(".hidden_x2"), ".hidden_x2");
+        assert_eq!(r_symbol("my var"), "`my var`");
+        assert_eq!(r_symbol(".2x"), "`.2x`");
+        assert_eq!(r_symbol("2x"), "`2x`");
+        assert_eq!(r_symbol("if"), "`if`");
+        assert_eq!(r_symbol("a`b"), "`a\\`b`");
+    }
+
+    #[gpui::test]
+    async fn test_keys_move_expand_and_copy(cx: &mut gpui::TestAppContext) {
+        let (workspace, cx) = crate::tests::r_tools_workspace(cx).await;
+        let panel = workspace.read_with(cx, |workspace, cx| {
+            match workspace.panel::<VariablesPanel>(cx) {
+                Some(panel) => panel,
+                None => panic!("variables panel was not registered"),
+            }
+        });
+        panel.update(cx, |panel, _| {
+            panel.model.apply(
+                None,
+                &data(json!({ "method": "refresh", "params": { "length": 2, "variables": [ark_serialized_variable("df", true), ark_serialized_variable("y", false)], "version": 1 } })),
+            );
+            panel.model.expansions.insert(
+                vec!["df".into()],
+                Expansion::Loaded(vec![serde_json::from_value(ark_serialized_variable("x", false)).unwrap()]),
+            );
+        });
+        let selected = |cx: &mut gpui::VisualTestContext| {
+            panel.read_with(cx, |panel, _| panel.selected.clone())
+        };
+        let path = |keys: &[&str]| Some(keys.iter().map(|key| key.to_string()).collect::<Vec<_>>());
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.select_next(&SelectNext, window, cx);
+            panel.expand_selected(&ExpandSelectedVariable, window, cx);
+        });
+        assert_eq!(selected(cx), path(&["df", "x"]));
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.collapse_selected(&CollapseSelectedVariable, window, cx)
+        });
+        assert_eq!(selected(cx), path(&["df"]));
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.collapse_selected(&CollapseSelectedVariable, window, cx);
+            panel.select_next(&SelectNext, window, cx);
+            panel.select_next(&SelectNext, window, cx);
+            panel.copy_selected_name(&CopyVariableName, window, cx);
+        });
+        assert_eq!(selected(cx), path(&["y"]));
+        assert!(panel.read_with(cx, |panel, _| panel.model.expansions.is_empty()));
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("y"));
     }
 }

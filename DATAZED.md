@@ -4,6 +4,7 @@ DataZed is [Zed](https://github.com/zed-industries/zed) with tools for running c
 
 - `cmd-enter` runs the selection, or the whole top-level statement at the cursor, and moves to the next statement (for the languages in `repl.run_by_statement`: R, Python and Julia by default).
 - A variables panel lists the objects in the session; data frames and lists expand. It needs Ark, Positron's Python kernel or DataZedVariables in IJulia (set up below); with other kernels it says so.
+- Clicking a variable copies its name and, when the console below is open, prints its structure there: `str(x)` in R, `dump(x; maxdepth=1)` in Julia. Only top-level objects print, and Python prints nothing. The disclosure arrow expands a data frame or list. With the panel focused, `up`/`down` or `k`/`j` move, `right`/`left` or `l`/`h` expand and collapse, `enter` prints the structure and `y` copies the name.
 - A plots pane shows plots as they are drawn. It opens beside the editor with the first plot; once closed, `ctrl-alt-p` reopens it.
 - `ctrl-cmd-enter` sends the same code to Zed's active terminal when it runs R, radian, Python, IPython, Julia or the console below; it refuses a plain shell, where code such as `x > y` would overwrite the file `y`.
 - `ctrl-alt-c` opens a console in Zed's terminal attached to the same kernel session as the editor, so both see the same objects. The console prints only what runs in it; with its tab active, `ctrl-cmd-enter` sends code from the editor there.
@@ -169,6 +170,7 @@ Commit hashes change with every rebase, so the table names commits by subject.
 | julia: add DataZedVariables, which serves the variables panel from IJulia | yes | nothing; a separate Julia package that the variables panel talks to |
 | Add a workflow and a script that rebase DataZed onto new Zed releases | yes | nothing; the workflow runs only in dwinkler1/datazed, with the `DATAZED_PUSH_TOKEN` secret |
 | Add DATAZED.md and DataZed's agent skills | yes | nothing; documentation and agent skills |
+| r_tools: copy names and print structure from the variables panel | no | the console commit, whose helpers it uses, and DATAZED.md |
 
 "Stands alone" means the commit applied cleanly by itself to `datazed/base` in a `git merge-tree` dry run. "Needs" also lists earlier commits whose code a commit uses, even where it would apply without them. On a `Cargo.lock` conflict, keep your branch's version (`git checkout --ours Cargo.lock` during a cherry-pick) and run `cargo check -p zed`, which adds the `r_tools` and `tree-sitter-r` entries back. The keymap files conflict if you have changed the same bindings.
 

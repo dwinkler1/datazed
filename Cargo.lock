@@ -14452,6 +14452,7 @@ dependencies = [
  "gpui",
  "jupyter-protocol",
  "log",
+ "menu",
  "project",
  "repl",
  "serde",

@@ -15,7 +15,7 @@ use task::{
     HideStrategy, RevealStrategy, RevealTarget, SaveStrategy, Shell, SpawnInTerminal, TaskId,
 };
 use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
-use workspace::{Toast, Workspace, dock::Panel as _, notifications::NotificationId};
+use workspace::{Pane, Toast, Workspace, dock::Panel as _, notifications::NotificationId};
 
 pub use plot_view::PlotView;
 pub use variables_panel::VariablesPanel;
@@ -31,6 +31,14 @@ actions!(
         SendToTerminal,
         /// Opens a Jupyter console in a terminal, attached to the REPL session.
         OpenConsole,
+        /// Expands the selected variable, or selects its first child if it is expanded.
+        ExpandSelectedVariable,
+        /// Collapses the selected variable, or selects its parent if it is collapsed.
+        CollapseSelectedVariable,
+        /// Copies the selected variable's name to the clipboard.
+        CopyVariableName,
+        /// Prints the selected variable's structure in the REPL console: `str()` in R, `dump()` in Julia.
+        PrintVariableStructure,
     ]
 );
 
@@ -43,7 +51,8 @@ pub fn init(cx: &mut App) {
         let tracker = cx.new(|cx| SessionTracker::new(&workspace_entity, cx));
 
         plot_view::open_on_first_plot(&tracker, window, cx);
-        let panel = cx.new(|cx| VariablesPanel::new(tracker.clone(), cx));
+        let panel =
+            cx.new(|cx| VariablesPanel::new(tracker.clone(), workspace_entity.downgrade(), cx));
         workspace.add_panel(panel, window, cx);
 
         workspace.register_action(|workspace, _: &ToggleVariables, window, cx| {
@@ -302,6 +311,37 @@ fn open_console(
     .detach();
 }
 
+/// The terminal running the console that OpenConsole started on this kernel
+/// connection file, with its pane and its index there.
+fn find_console(
+    workspace: &Workspace,
+    connection_file: &std::path::Path,
+    cx: &App,
+) -> Option<(Entity<Pane>, usize, Entity<TerminalView>)> {
+    let connection_file = connection_file.to_string_lossy();
+    let terminal_panel = workspace.panel::<TerminalPanel>(cx)?;
+    terminal_panel
+        .read(cx)
+        .panes()
+        .into_iter()
+        .find_map(|pane| {
+            pane.read(cx)
+                .items()
+                .enumerate()
+                .find_map(|(index, item)| {
+                    let terminal_view = item.downcast::<TerminalView>()?;
+                    let (name, argv) = terminal_view
+                        .read(cx)
+                        .terminal()
+                        .read(cx)
+                        .foreground_process()?;
+                    (is_repl(&name, &argv) && argv.iter().any(|arg| *arg == connection_file))
+                        .then_some((index, terminal_view))
+                })
+                .map(|(index, terminal_view)| (pane.clone(), index, terminal_view))
+        })
+}
+
 /// Whether a terminal's foreground process is a REPL that takes pasted code:
 /// R, radian, Python, IPython, Julia, or the jupyter-console that
 /// OpenConsole starts. Code is pasted only into these, so a shell never
@@ -470,20 +510,7 @@ fn send_to_terminal(
         code.push('\n');
     }
 
-    let terminal = terminal_view.read(cx).terminal().clone();
-    terminal.update(cx, |terminal, _| terminal.paste(&code));
-    // Python's REPL from 3.14 drops an Enter that arrives together with the end of
-    // a paste, so every send would wait at `...`; 50 ms apart avoids that.
-    let terminal = terminal.downgrade();
-    cx.spawn(async move |_, cx| {
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(50))
-            .await;
-        terminal
-            .update(cx, |terminal, _| terminal.input(b"\r".to_vec()))
-            .ok();
-    })
-    .detach();
+    paste_and_run(&terminal_view, &code, cx);
     // Show a closed terminal panel without taking focus from the editor.
     workspace.open_panel::<TerminalPanel>(window, cx);
 
@@ -497,6 +524,24 @@ fn send_to_terminal(
             );
         });
     }
+}
+
+/// Pastes `code` into a terminal's REPL and presses Enter.
+fn paste_and_run(terminal_view: &Entity<TerminalView>, code: &str, cx: &mut App) {
+    let terminal = terminal_view.read(cx).terminal().clone();
+    terminal.update(cx, |terminal, _| terminal.paste(code));
+    // Python's REPL from 3.14 drops an Enter that arrives together with the end of
+    // a paste, so every send would wait at `...`; 50 ms apart avoids that.
+    let terminal = terminal.downgrade();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(50))
+            .await;
+        terminal
+            .update(cx, |terminal, _| terminal.input(b"\r".to_vec()))
+            .ok();
+    })
+    .detach();
 }
 
 #[cfg(test)]
@@ -524,7 +569,7 @@ mod tests {
         }
     }
 
-    async fn r_tools_workspace(
+    pub(crate) async fn r_tools_workspace(
         cx: &mut TestAppContext,
     ) -> (Entity<Workspace>, &mut gpui::VisualTestContext) {
         cx.update(|cx| {
@@ -616,7 +661,8 @@ mod tests {
         assert_eq!(saved.ok().flatten().as_deref(), Some("left"));
 
         let tracker = panel.read_with(cx, |panel, _| panel.tracker().clone());
-        let reopened = cx.update(|_, cx| cx.new(|cx| VariablesPanel::new(tracker, cx)));
+        let reopened =
+            cx.update(|_, cx| cx.new(|cx| VariablesPanel::new(tracker, workspace.downgrade(), cx)));
         cx.update(|window, cx| {
             assert_eq!(
                 reopened.read(cx).position(window, cx),
