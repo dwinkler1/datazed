@@ -1718,4 +1718,20 @@
       "ctrl-alt-c": "r_tools::OpenConsole",
     },
   },
+  {
+    "context": "VariablesPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "k": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "j": "menu::SelectNext",
+      "right": "r_tools::ExpandSelectedVariable",
+      "l": "r_tools::ExpandSelectedVariable",
+      "left": "r_tools::CollapseSelectedVariable",
+      "h": "r_tools::CollapseSelectedVariable",
+      "enter": "r_tools::PrintVariableStructure",
+      "y": "r_tools::CopyVariableName",
+    },
+  },
 ]
