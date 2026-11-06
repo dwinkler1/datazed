@@ -125,6 +125,8 @@ The kernel runs from inside `Positron.app`, so a Positron update can move these 
 | `ctrl-alt-p` | Open the plots pane |
 | `ctrl-alt-c` | Open a console attached to the kernel session; run some code first so the session exists |
 
+With vim mode on, `space e v` toggles the variables panel and `space t k` opens the kernel console, from any file, an empty pane or the "Could not open file" view. It makes `space` a prefix in normal and visual mode, so a lone `space` (move right) waits for the chord timeout.
+
 ## Settings
 
 | Setting | Default | Effect |
@@ -171,6 +173,7 @@ Commit hashes change with every rebase, so the table names commits by subject.
 | Add a workflow and a script that rebase DataZed onto new Zed releases | yes | nothing; the workflow runs only in dwinkler1/datazed, with the `DATAZED_PUSH_TOKEN` secret |
 | Add DATAZED.md and DataZed's agent skills | yes | nothing; documentation and agent skills |
 | r_tools: copy names and print structure from the variables panel | no | the console commit, whose helpers it uses, and DATAZED.md |
+| vim: space leader keys for the variables panel and console | no | the console commit, and DATAZED.md |
 
 "Stands alone" means the commit applied cleanly by itself to `datazed/base` in a `git merge-tree` dry run. "Needs" also lists earlier commits whose code a commit uses, even where it would apply without them. On a `Cargo.lock` conflict, keep your branch's version (`git checkout --ours Cargo.lock` during a cherry-pick) and run `cargo check -p zed`, which adds the `r_tools` and `tree-sitter-r` entries back. The keymap files conflict if you have changed the same bindings.
 
