@@ -1314,4 +1314,14 @@
       "shift-tab": "skill_creator::FocusPreviousField",
     },
   },
+  {
+    // DataZed: variables panel and kernel console from anywhere in vim
+    // normal or visual mode. EmptyPane and InvalidItem (the "Could not open
+    // file" view) have no VimControl, so they are listed explicitly.
+    "context": "(VimControl && !menu) || EmptyPane || InvalidItem",
+    "bindings": {
+      "space e v": "r_tools::ToggleVariables",
+      "space t k": "r_tools::OpenConsole",
+    },
+  },
 ]
