@@ -132,14 +132,16 @@ pub fn start_kernel_tasks<S: KernelSession + 'static>(
                             })
                             .ok();
                     }
-                    // Ark sends comm_close without the `data` field that
-                    // jupyter-protocol requires, for example after `View(df)`
-                    // and `rm(df)`.
+                    // An iopub message that does not parse is one lost output,
+                    // not a dead kernel: Ark's HTML viewer (tinytable,
+                    // htmlwidgets) sends `display_data` with `metadata: null`.
+                    // Ark also sends comm_close without the `data` field, for
+                    // example after `View(df)` and `rm(df)`.
                     Err(runtimelib::RuntimeError::ParseError {
                         ref msg_type,
                         ref source,
-                    }) if msg_type == "comm_close" => {
-                        log::warn!("kernel: ignoring a comm_close on {channel}: {source}");
+                    }) if channel == "iopub" || msg_type == "comm_close" => {
+                        log::warn!("kernel: ignoring a {msg_type} on {channel}: {source}");
                     }
                     Err(
                         ref err @ (runtimelib::RuntimeError::ParseError { .. }
