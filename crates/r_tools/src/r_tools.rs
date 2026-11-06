@@ -1,4 +1,4 @@
-mod help;
+mod browser;
 mod plot_view;
 mod variables_panel;
 
@@ -52,9 +52,9 @@ pub fn init(cx: &mut App) {
         let tracker = cx.new(|cx| SessionTracker::new(&workspace_entity, cx));
 
         plot_view::open_on_first_plot(&tracker, window, cx);
-        let help_comms = help::HelpComms::new(tracker.clone(), cx);
-        // The workspace owns the help comms for its lifetime.
-        cx.on_release(move |_, _| drop(help_comms)).detach();
+        let browser_comms = browser::BrowserComms::new(tracker.clone(), cx);
+        // The workspace owns the help and UI comms for its lifetime.
+        cx.on_release(move |_, _| drop(browser_comms)).detach();
         let panel =
             cx.new(|cx| VariablesPanel::new(tracker.clone(), workspace_entity.downgrade(), cx));
         workspace.add_panel(panel, window, cx);
