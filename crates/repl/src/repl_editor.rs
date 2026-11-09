@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use editor::{Editor, MultiBufferOffset};
-use gpui::{App, Entity, WeakEntity, Window, prelude::*};
+use gpui::{App, Entity, PromptLevel, WeakEntity, Window, prelude::*};
 use language::{BufferSnapshot, Language, LanguageName, Point};
 use project::{ProjectItem as _, WorktreeId};
 use workspace::{Workspace, notifications::NotificationId};
@@ -18,6 +18,7 @@ use crate::{
     ReplSettings, Restart, Session, Shutdown,
 };
 use settings::Settings as _;
+use util::ResultExt as _;
 
 pub fn assign_kernelspec(
     kernel_specification: KernelSpecification,
@@ -82,8 +83,22 @@ pub fn install_ipykernel_and_assign(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
+    install_ipykernel_assign_then(kernel_specification, weak_editor, |_, _| {}, window, cx)
+}
+
+/// Like [`install_ipykernel_and_assign`], then calls `after_assign` once the
+/// new kernel is the editor's session; it is not called if the install fails.
+fn install_ipykernel_assign_then(
+    kernel_specification: KernelSpecification,
+    weak_editor: WeakEntity<Editor>,
+    after_assign: impl FnOnce(&mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
     let KernelSpecification::PythonEnv(ref env_spec) = kernel_specification else {
-        return assign_kernelspec(kernel_specification, weak_editor, window, cx);
+        assign_kernelspec(kernel_specification, weak_editor, window, cx)?;
+        after_assign(window, cx);
+        return Ok(());
     };
 
     let python_path = env_spec.path.clone();
@@ -172,7 +187,12 @@ pub fn install_ipykernel_and_assign(
                                 has_ipykernel: true,
                                 ..env_spec
                             });
-                        assign_kernelspec(updated_spec, weak_editor, window, cx).ok();
+                        if assign_kernelspec(updated_spec, weak_editor, window, cx)
+                            .log_err()
+                            .is_some()
+                        {
+                            after_assign(window, cx);
+                        }
                     })
                     .ok();
             }
@@ -200,6 +220,73 @@ pub fn install_ipykernel_and_assign(
     .detach();
 
     Ok(())
+}
+
+/// The uv environment `run` offers to install ipykernel into when no Python
+/// kernel is usable: the active toolchain if it is a uv environment, otherwise
+/// the first uv environment found for the worktree. Global and conda Pythons
+/// are never offered.
+fn uv_env_without_ipykernel(
+    store: &ReplStore,
+    worktree_id: WorktreeId,
+) -> Option<KernelSpecification> {
+    let is_candidate = |spec: &&KernelSpecification| matches!(spec, KernelSpecification::PythonEnv(env) if env.is_uv() && !env.has_ipykernel);
+    if let Some(active_path) = store.active_python_toolchain_path(worktree_id) {
+        let active = store
+            .kernel_specifications_for_worktree(worktree_id)
+            .find(|spec| spec.path().as_ref() == active_path.as_ref());
+        if let Some(active) = active {
+            return Some(active).filter(is_candidate).cloned();
+        }
+    }
+    store
+        .kernel_specifications_for_worktree(worktree_id)
+        .find(is_candidate)
+        .cloned()
+}
+
+/// Asks before installing ipykernel; on Install, installs it, makes that
+/// environment the editor's kernel and re-runs at the cursor.
+fn offer_ipykernel_install(
+    env: KernelSpecification,
+    weak_editor: WeakEntity<Editor>,
+    move_down: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let detail = format!(
+        "No Python kernel is available. DataZed will run:\n\nuv pip install ipykernel --python {}\n\n\
+         This does not change pyproject.toml or uv.lock, so the next `uv sync` removes it again.",
+        env.path()
+    );
+    let answer = window.prompt(
+        PromptLevel::Info,
+        &format!("Install ipykernel in {}?", env.name()),
+        Some(&detail),
+        &["Install", "Cancel"],
+        cx,
+    );
+    window
+        .spawn(cx, async move |cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            cx.update(|window, cx| {
+                let rerun_editor = weak_editor.clone();
+                install_ipykernel_assign_then(
+                    env,
+                    weak_editor,
+                    move |window, cx| {
+                        run(rerun_editor, move_down, window, cx).log_err();
+                    },
+                    window,
+                    cx,
+                )
+                .log_err();
+            })
+            .ok();
+        })
+        .detach();
 }
 
 pub fn run(
@@ -239,10 +326,20 @@ pub fn run(
             continue;
         };
 
-        let kernel_specification = store
-            .read(cx)
-            .active_kernelspec(project_path.worktree_id, Some(language.clone()), cx)
-            .with_context(|| format!("No kernel found for language: {}", language.name()))?;
+        let Some(kernel_specification) =
+            store
+                .read(cx)
+                .active_kernelspec(project_path.worktree_id, Some(language.clone()), cx)
+        else {
+            if language.name().as_ref() == "Python"
+                && let Some(env) =
+                    uv_env_without_ipykernel(store.read(cx), project_path.worktree_id)
+            {
+                offer_ipykernel_install(env, editor.downgrade(), move_down, window, cx);
+                return Ok(());
+            }
+            anyhow::bail!("No kernel found for language: {}", language.name());
+        };
 
         let fs = store.read(cx).fs().clone();
 
